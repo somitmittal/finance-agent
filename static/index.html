@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Finance Agent</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Finance Agent</h1>
+        <p>Official NSE/BSE filings, translated into investor plain English.</p>
+      </div>
+      <form id="searchForm" class="search">
+        <div class="search-symbol-field">
+          <input id="symbolInput" placeholder="Stock name or NSE symbol, e.g. Reliance" autocomplete="off" />
+          <div id="searchRecommendations" class="search-recommendations hidden"></div>
+        </div>
+        <input id="bseInput" type="hidden" />
+        <button type="submit" title="Analyze stock">Analyze</button>
+      </form>
+    </header>
+
+    <main class="layout">
+      <section class="workspace">
+        <div class="insight-strip">
+          <div>
+            <span class="label">Action</span>
+            <strong id="actionText">Search a stock</strong>
+          </div>
+          <div>
+            <span class="label">Confidence</span>
+            <strong id="confidenceText">-</strong>
+          </div>
+          <div>
+            <span class="label">Last Price</span>
+            <strong id="priceText">-</strong>
+          </div>
+          <div>
+            <span class="label">Move</span>
+            <strong id="moveText">-</strong>
+          </div>
+        </div>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div class="tabs" role="tablist" aria-label="Analysis views">
+              <button class="tab active" type="button" data-tab="summary">Readout</button>
+              <button class="tab" type="button" data-tab="news">Verified News</button>
+              <button class="tab" type="button" data-tab="risks">Risk Buckets</button>
+              <button class="tab" type="button" data-tab="portfolioRisks">Portfolio Risk</button>
+            </div>
+            <span id="statusText">Waiting</span>
+          </div>
+          <div id="summary" class="tab-view summary empty">Enter a stock symbol to fetch the latest official announcements.</div>
+          <div id="verifiedNews" class="tab-view news-view hidden"></div>
+          <div id="riskBuckets" class="tab-view risk-view hidden"></div>
+          <div id="portfolioRisk" class="tab-view risk-view hidden">
+            <div class="empty-block">Add portfolio stocks, then scan risk buckets.</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Announcement Tape</h2>
+            <span>NSE + BSE</span>
+          </div>
+          <div id="announcementList" class="announcement-list"></div>
+        </section>
+      </section>
+
+      <aside class="portfolio">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Portfolio</h2>
+            <button id="newStockBtn" class="ghost" title="Clear form">New</button>
+          </div>
+          <form id="portfolioForm" class="portfolio-form">
+            <input type="hidden" id="portfolioId" />
+            <label>Symbol<input id="portfolioSymbol" required placeholder="TCS" /></label>
+            <label>Company<input id="companyName" placeholder="Tata Consultancy Services" /></label>
+            <label>BSE Code<input id="bseCode" placeholder="532540" /></label>
+            <div class="two-col">
+              <label>Qty<input id="quantity" type="number" min="0" step="0.01" value="0" /></label>
+              <label>Avg Price<input id="avgPrice" type="number" min="0" step="0.01" value="0" /></label>
+            </div>
+            <label>Thesis<textarea id="thesis" rows="3" placeholder="Why you own or track it"></textarea></label>
+            <button type="submit">Save Stock</button>
+          </form>
+          <div id="portfolioList" class="portfolio-list"></div>
+        </section>
+      </aside>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
