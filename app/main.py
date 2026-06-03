@@ -16,7 +16,7 @@ from urllib.parse import quote, urljoin, urlparse
 
 import requests
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
@@ -1349,6 +1349,17 @@ def combined_announcements(symbol: str, bse_code: str = "") -> List[Dict[str, An
 @app.on_event("startup")
 def startup() -> None:
     db().close()
+
+
+@app.get("/health")
+@app.head("/health")
+def health() -> JSONResponse:
+    return JSONResponse({"ok": True})
+
+
+@app.head("/")
+def index_head() -> Response:
+    return Response(status_code=200)
 
 
 @app.get("/")

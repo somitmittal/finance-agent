@@ -17,6 +17,20 @@ python3 -m uvicorn app.main:app --reload --port 8000
 
 Open `http://127.0.0.1:8000`.
 
+## Deploy on Render
+
+Set the **Start Command** to:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
+```
+
+Render injects `PORT` automatically. The app must listen on `0.0.0.0`, not `127.0.0.1`, or the deploy health check will fail.
+
+Add environment variables in the Render dashboard: `INDIAN_API_KEY`, and optionally `OPENAI_API_KEY`.
+
+Health check path: `/health`
+
 ## Notes
 
 - Enter NSE symbols such as `RELIANCE`, `TCS`, `INFY`, `HDFCBANK`.
