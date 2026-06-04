@@ -93,6 +93,11 @@ class PortfolioOut(PortfolioIn):
     updated_at: str
 
 
+class StockChatIn(BaseModel):
+    question: str = Field(..., min_length=3, max_length=1200)
+    bse_code: str = Field("", max_length=16)
+
+
 def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
@@ -263,6 +268,72 @@ def list_from_payload(payload: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def value_by_key_fragment(data: Any, fragments: tuple[str, ...]) -> Any:
+    if isinstance(data, dict):
+        for key, value in data.items():
+            normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if any(fragment in normalized for fragment in fragments):
+                return value
+        for value in data.values():
+            found = value_by_key_fragment(value, fragments)
+            if found not in (None, "", [], {}):
+                return found
+    elif isinstance(data, list):
+        for item in data:
+            found = value_by_key_fragment(item, fragments)
+            if found not in (None, "", [], {}):
+                return found
+    return None
+
+
+def extract_shareholding(data: Dict[str, Any]) -> Dict[str, Any]:
+    raw = (
+        value_by_key_fragment(data, ("shareholding", "shareholdingpattern", "shareholder"))
+        or data.get("shareholding")
+        or data.get("shareHoldingPattern")
+        or {}
+    )
+    text = json.dumps(raw, default=str).lower() if raw else ""
+    categories = {
+        "promoter": ("promoter", "promoters"),
+        "fii": ("fii", "foreigninstitution", "foreignportfolio", "fpi"),
+        "dii": ("dii", "domesticinstitution", "mutualfund", "insurance"),
+        "public": ("public", "retail", "others"),
+    }
+    parsed = {}
+    for label, fragments in categories.items():
+        value = value_by_key_fragment(raw, fragments) if raw else None
+        if isinstance(value, dict):
+            percent = value_by_key_fragment(value, ("percent", "holding", "share"))
+        else:
+            percent = value
+        parsed[label] = parse_float(percent)
+
+    signals = []
+    if parsed.get("promoter") is not None:
+        if parsed["promoter"] >= 50:
+            signals.append("Promoter holding is above 50%, indicating owner alignment if pledge is not elevated.")
+        elif parsed["promoter"] < 30:
+            signals.append("Promoter holding is below 30%; check institutional ownership and governance history.")
+    if parsed.get("fii") is not None and parsed["fii"] > 10:
+        signals.append("FII ownership is meaningful, suggesting foreign institutional interest.")
+    if parsed.get("dii") is not None and parsed["dii"] > 10:
+        signals.append("DII ownership is meaningful, suggesting domestic institutional interest.")
+    if "pledge" in text:
+        signals.append("Pledge-related wording appears in shareholding data; verify pledged promoter shares.")
+
+    available = any(value is not None for value in parsed.values())
+    return {
+        "available": available,
+        "promoter_percent": parsed.get("promoter"),
+        "fii_percent": parsed.get("fii"),
+        "dii_percent": parsed.get("dii"),
+        "public_percent": parsed.get("public"),
+        "signals": signals,
+        "note": "Shareholding is parsed from provider payload when available; verify with latest exchange shareholding pattern filings.",
+    }
+
+
 def fetch_indian_api_stock(symbol: str) -> Dict[str, Any]:
     data = fetch_indian_api("/stock", {"name": symbol})
     if not isinstance(data, dict):
@@ -290,6 +361,7 @@ def fetch_indian_api_stock(symbol: str) -> Dict[str, Any]:
         "industry": data.get("industry"),
         "bse_code": nested_get(data, "companyProfile", "exchangeCodeBse"),
         "nse_code": nested_get(data, "companyProfile", "exchangeCodeNse"),
+        "shareholding": extract_shareholding(data),
         "provider": "IndianAPI",
     }
 
@@ -872,6 +944,168 @@ NEWS_NEGATIVE_TERMS = {
     "investigation",
 }
 
+ORDER_KEYWORDS = {
+    "agreement",
+    "award",
+    "contract",
+    "epc",
+    "letter of acceptance",
+    "letter of award",
+    "loa",
+    "order",
+    "project",
+    "purchase order",
+    "tender",
+    "work order",
+}
+
+ORDER_EXCLUSION_TERMS = {
+    "adjudication order",
+    "court order",
+    "interim order",
+    "sebi order",
+    "show cause",
+}
+
+PREFERENTIAL_KEYWORDS = {
+    "allotment of warrants",
+    "convertible warrants",
+    "preferential allotment",
+    "preferential basis",
+    "preferential issue",
+    "preferential offer",
+    "warrants",
+}
+
+MOVEMENT_UP_TERMS = NEWS_POSITIVE_TERMS | {
+    "capacity expansion",
+    "fund raise",
+    "large order",
+    "new order",
+    "partnership",
+    "preferential issue",
+    "strategic investor",
+}
+
+MOVEMENT_DOWN_TERMS = NEWS_NEGATIVE_TERMS | {
+    "auditor resignation",
+    "equity dilution",
+    "pledged shares",
+    "promoter selling",
+    "weak results",
+}
+
+THEME_BUCKETS = {
+    "data_center_ai": {
+        "label": "Data Center / AI Infrastructure",
+        "keywords": [
+            "ai",
+            "artificial intelligence",
+            "cloud",
+            "colocation",
+            "data center",
+            "gpu",
+            "hyperscale",
+            "server",
+        ],
+    },
+    "water_management": {
+        "label": "Water Management",
+        "keywords": [
+            "desalination",
+            "effluent",
+            "irrigation",
+            "sewage",
+            "stp",
+            "wastewater",
+            "water",
+            "water treatment",
+        ],
+    },
+    "renewable_energy": {
+        "label": "Renewable Energy / Power Transition",
+        "keywords": [
+            "battery",
+            "ev",
+            "green hydrogen",
+            "hybrid power",
+            "renewable",
+            "solar",
+            "wind",
+        ],
+    },
+    "defence_aerospace": {
+        "label": "Defence / Aerospace",
+        "keywords": [
+            "aerospace",
+            "defence",
+            "defense",
+            "drone",
+            "missile",
+            "radar",
+            "space",
+        ],
+    },
+    "railways_mobility": {
+        "label": "Railways / Mobility",
+        "keywords": [
+            "coach",
+            "metro",
+            "mobility",
+            "rail",
+            "railway",
+            "rolling stock",
+            "vande bharat",
+        ],
+    },
+    "electronics_semiconductor": {
+        "label": "Electronics / Semiconductors",
+        "keywords": [
+            "chip",
+            "electronics",
+            "ems",
+            "fab",
+            "printed circuit",
+            "semiconductor",
+        ],
+    },
+    "healthcare_pharma": {
+        "label": "Healthcare / Pharma",
+        "keywords": [
+            "api",
+            "biosimilar",
+            "clinical",
+            "drug",
+            "healthcare",
+            "hospital",
+            "pharma",
+        ],
+    },
+    "infra_capex": {
+        "label": "Infrastructure / Capex",
+        "keywords": [
+            "capex",
+            "cement",
+            "construction",
+            "engineering",
+            "infrastructure",
+            "project",
+            "road",
+        ],
+    },
+}
+
+MAJOR_RED_FLAG_TERMS = {
+    "default": "Debt default / repayment stress",
+    "fraud": "Fraud or governance allegation",
+    "insolvency": "Insolvency / NCLT risk",
+    "nclt": "NCLT / tribunal action",
+    "pledge": "Promoter pledge or encumbrance",
+    "resignation": "Auditor, board, or KMP resignation",
+    "sebi": "SEBI or regulatory action",
+    "wilful defaulter": "Wilful defaulter risk",
+}
+
 
 def score_announcement(text: str) -> Dict[str, Any]:
     lowered = text.lower()
@@ -1196,6 +1430,564 @@ def news_summary_sentence(
     return f"Verified news is mixed or neutral across {len(news_items)} trusted items."
 
 
+def snippet(text: str, limit: int = 240) -> str:
+    cleaned = clean_text(text)
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[: limit - 3].rstrip()}..."
+
+
+def evidence_items(announcements: List[Dict[str, Any]], news_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for item in announcements:
+        summary = item.get("summary", {}) if isinstance(item.get("summary"), dict) else {}
+        text = clean_text(
+            " ".join(
+                [
+                    str(item.get("subject", "")),
+                    str(item.get("category", "")),
+                    str(item.get("details", "")),
+                    str(summary.get("plain_english", "")),
+                ]
+            )
+        )
+        items.append(
+            {
+                "kind": "announcement",
+                "source": item.get("source") or "Exchange filing",
+                "date": item.get("date") or "",
+                "title": item.get("subject") or item.get("category") or "Exchange filing",
+                "text": text,
+                "url": item.get("attachment") or "",
+            }
+        )
+    for item in news_items:
+        text = clean_text(f"{item.get('title', '')} {item.get('summary', '')}")
+        items.append(
+            {
+                "kind": "news",
+                "source": item.get("source") or item.get("provider") or "Verified news",
+                "date": item.get("published_at") or "",
+                "title": item.get("title") or "Verified news",
+                "text": text,
+                "url": item.get("url") or "",
+            }
+        )
+    return items
+
+
+def money_mentions(text: str) -> List[Dict[str, Any]]:
+    pattern = re.compile(
+        r"(\d[\d,]*(?:\.\d+)?)\s*(crore|cr|lakh|million|mn|billion|bn)s?\b",
+        re.IGNORECASE,
+    )
+    mentions = []
+    for match in pattern.finditer(text):
+        amount = parse_float(match.group(1))
+        unit = match.group(2).lower()
+        if amount is None:
+            continue
+        if unit.startswith(("cr", "crore")):
+            crore_value = amount
+        elif unit.startswith("lakh"):
+            crore_value = amount / 100
+        elif unit in {"million", "mn"}:
+            crore_value = amount / 10
+        elif unit in {"billion", "bn"}:
+            crore_value = amount * 100
+        else:
+            crore_value = None
+        mentions.append({"display": clean_text(match.group(0)), "crore_value": crore_value})
+    return mentions
+
+
+def price_mentions(text: str) -> List[str]:
+    patterns = [
+        r"(?:issue price|floor price|conversion price|priced at|price of)\D{0,45}(?:rs\.?|inr|rupees)\s*([0-9][0-9,]*(?:\.\d+)?)",
+        r"(?:rs\.?|inr|rupees)\s*([0-9][0-9,]*(?:\.\d+)?)\D{0,45}(?:per share|per warrant|each)",
+    ]
+    prices = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            value = parse_float(match.group(1))
+            if value is not None:
+                prices.append(f"Rs {value:g}")
+    return list(dict.fromkeys(prices))
+
+
+def has_any_term(text: str, terms: set[str]) -> bool:
+    lowered = text.lower()
+    return any(term in lowered for term in terms)
+
+
+def parse_any_date(value: Any) -> Optional[dt.datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        pass
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%d-%b-%Y %H:%M:%S",
+        "%d-%b-%Y",
+        "%Y%m%d%H%M%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y",
+    ):
+        try:
+            return dt.datetime.strptime(text[:19], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def financial_year(value: Any) -> str:
+    parsed = parse_any_date(value)
+    if not parsed:
+        return "FY unknown"
+    start_year = parsed.year if parsed.month >= 4 else parsed.year - 1
+    return f"FY{start_year}-{str(start_year + 1)[-2:]}"
+
+
+def yahoo_symbol(symbol: str) -> str:
+    return f"{symbol.replace('&', '%26')}.NS"
+
+
+def fetch_price_history(symbol: str) -> List[Dict[str, Any]]:
+    end = int(dt.datetime.now(dt.timezone.utc).timestamp())
+    start = int((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=430)).timestamp())
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol(symbol)}"
+    payload = fetch_json(http_session(), f"{url}?period1={start}&period2={end}&interval=1d", referer="https://finance.yahoo.com", timeout=10)
+    result = (payload.get("chart", {}).get("result") or [{}])[0]
+    timestamps = result.get("timestamp") or []
+    quote = (result.get("indicators", {}).get("quote") or [{}])[0]
+    closes = quote.get("close") or []
+    highs = quote.get("high") or []
+    lows = quote.get("low") or []
+    history = []
+    for index, ts in enumerate(timestamps):
+        close = closes[index] if index < len(closes) else None
+        if close is None:
+            continue
+        history.append(
+            {
+                "date": dt.datetime.fromtimestamp(ts, dt.timezone.utc).date().isoformat(),
+                "close": float(close),
+                "high": float(highs[index]) if index < len(highs) and highs[index] is not None else float(close),
+                "low": float(lows[index]) if index < len(lows) and lows[index] is not None else float(close),
+            }
+        )
+    return history
+
+
+def average(values: List[float]) -> Optional[float]:
+    return sum(values) / len(values) if values else None
+
+
+def analyze_technical(symbol: str, quote: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        history = fetch_price_history(symbol)
+    except Exception as exc:
+        return {
+            "available": False,
+            "pattern": "Technical data unavailable",
+            "bias": "unknown",
+            "summary": f"Could not fetch daily price history: {exc}",
+            "signals": [],
+            "levels": {},
+            "note": "Technical analysis requires external daily price history and is not financial advice.",
+        }
+
+    closes = [item["close"] for item in history]
+    highs = [item["high"] for item in history]
+    lows = [item["low"] for item in history]
+    last = parse_float(quote.get("last_price")) or (closes[-1] if closes else None)
+    if not closes or last is None:
+        return {
+            "available": False,
+            "pattern": "Technical data unavailable",
+            "bias": "unknown",
+            "summary": "Daily price history did not include usable closes.",
+            "signals": [],
+            "levels": {},
+            "note": "Technical analysis requires external daily price history and is not financial advice.",
+        }
+
+    sma20 = average(closes[-20:])
+    sma50 = average(closes[-50:])
+    sma200 = average(closes[-200:])
+    support = min(lows[-30:]) if len(lows) >= 30 else min(lows)
+    resistance = max(highs[-30:]) if len(highs) >= 30 else max(highs)
+    year_high = max(highs[-252:]) if len(highs) >= 60 else max(highs)
+    year_low = min(lows[-252:]) if len(lows) >= 60 else min(lows)
+    recent_return = ((last - closes[-20]) / closes[-20]) * 100 if len(closes) >= 20 and closes[-20] else 0
+    price_range = max(resistance - support, last * 0.03)
+
+    signals = []
+    if sma20 and sma50 and last > sma20 > sma50:
+        pattern = "bullish moving-average stack"
+        bias = "bullish"
+        signals.append("Price is above the 20-DMA and 20-DMA is above 50-DMA.")
+    elif sma20 and sma50 and last < sma20 < sma50:
+        pattern = "bearish moving-average stack"
+        bias = "bearish"
+        signals.append("Price is below the 20-DMA and 20-DMA is below 50-DMA.")
+    elif last >= resistance * 0.98 and recent_return > 5:
+        pattern = "near breakout / momentum continuation"
+        bias = "bullish"
+        signals.append("Price is trading close to recent resistance after a strong 20-day move.")
+    elif last <= support * 1.03 and recent_return < -5:
+        pattern = "breakdown risk / weak momentum"
+        bias = "bearish"
+        signals.append("Price is close to recent support after a weak 20-day move.")
+    else:
+        pattern = "range-bound consolidation"
+        bias = "neutral"
+        signals.append("Price is between recent support and resistance.")
+
+    if sma50 and sma200:
+        if sma50 > sma200:
+            signals.append("50-DMA is above 200-DMA, a constructive medium-term trend signal.")
+        elif sma50 < sma200:
+            signals.append("50-DMA is below 200-DMA, a cautious medium-term trend signal.")
+
+    bullish_target = resistance + price_range * 0.618
+    bearish_target = support - price_range * 0.618
+    summary = f"Currently forming a {pattern}; technical bias is {bias}."
+    return {
+        "available": True,
+        "pattern": pattern,
+        "bias": bias,
+        "summary": summary,
+        "signals": signals[:6],
+        "levels": {
+            "last_price": round(last, 2),
+            "support": round(support, 2),
+            "resistance": round(resistance, 2),
+            "sma20": round(sma20, 2) if sma20 else None,
+            "sma50": round(sma50, 2) if sma50 else None,
+            "sma200": round(sma200, 2) if sma200 else None,
+            "year_high": round(year_high, 2),
+            "year_low": round(year_low, 2),
+            "bullish_target": round(bullish_target, 2),
+            "bearish_target": round(max(0, bearish_target), 2),
+        },
+        "note": "Targets are rule-based technical levels from recent support/resistance, not guaranteed outcomes.",
+    }
+
+
+def analyze_order_book(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    order_items = []
+    yearly: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        text = item.get("text", "")
+        lowered = text.lower()
+        if not has_any_term(lowered, ORDER_KEYWORDS) or has_any_term(lowered, ORDER_EXCLUSION_TERMS):
+            continue
+        amounts = money_mentions(text)
+        best_amount = max(
+            (amount for amount in amounts if amount.get("crore_value") is not None),
+            key=lambda amount: amount["crore_value"],
+            default=None,
+        )
+        fy = financial_year(item.get("date", ""))
+        if best_amount:
+            bucket = yearly.setdefault(fy, {"fy": fy, "total_crore": 0.0, "item_count": 0, "undisclosed_count": 0})
+            bucket["total_crore"] += float(best_amount["crore_value"])
+        else:
+            bucket = yearly.setdefault(fy, {"fy": fy, "total_crore": 0.0, "item_count": 0, "undisclosed_count": 0})
+            bucket["undisclosed_count"] += 1
+        bucket["item_count"] += 1
+        order_items.append(
+            {
+                "fy": fy,
+                "date": item.get("date", ""),
+                "source": item.get("source", ""),
+                "title": item.get("title", ""),
+                "summary": snippet(text),
+                "amount": best_amount["display"] if best_amount else "Value not disclosed",
+                "amount_crore": round(float(best_amount["crore_value"]), 2) if best_amount else None,
+                "url": item.get("url", ""),
+            }
+        )
+
+    yearly_totals = sorted(
+        [
+            {
+                **bucket,
+                "total_crore": round(bucket["total_crore"], 2),
+                "headline": f"{bucket['fy']}: Rs {bucket['total_crore']:,.2f} crore across {bucket['item_count']} fetched updates",
+            }
+            for bucket in yearly.values()
+        ],
+        key=lambda bucket: bucket["fy"],
+        reverse=True,
+    )
+    lifetime_total = sum(bucket["total_crore"] for bucket in yearly_totals)
+    if yearly_totals:
+        headline = f"Latest FY disclosed order wins: {yearly_totals[0]['headline']}"
+    elif order_items:
+        headline = "Order/contract updates found, but value was not disclosed in fetched text"
+    else:
+        headline = "No order-book additions found in fetched filings/news"
+
+    return {
+        "headline": headline,
+        "disclosed_order_value_crore": round(lifetime_total, 2) if lifetime_total else None,
+        "yearly_totals": yearly_totals,
+        "items": order_items[:8],
+        "note": "FY buckets aggregate fetched order/contract disclosures by Indian financial year; this is not the full audited order book unless every order was disclosed and fetched.",
+    }
+
+
+def analyze_preferential_issues(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    issues = []
+    for item in items:
+        text = item.get("text", "")
+        if not has_any_term(text, PREFERENTIAL_KEYWORDS):
+            continue
+        amounts = money_mentions(text)
+        issues.append(
+            {
+                "date": item.get("date", ""),
+                "source": item.get("source", ""),
+                "title": item.get("title", ""),
+                "prices": price_mentions(text),
+                "amounts": [amount["display"] for amount in amounts[:3]],
+                "summary": snippet(text),
+                "url": item.get("url", ""),
+            }
+        )
+    return {
+        "count": len(issues),
+        "items": issues[:8],
+        "note": "Preferential issue data is parsed from fetched filings/news; open the filing before relying on price or allotment terms.",
+    }
+
+
+def analyze_movement_drivers(
+    quote: Dict[str, Any],
+    announcements: List[Dict[str, Any]],
+    news_items: List[Dict[str, Any]],
+    order_book: Dict[str, Any],
+    preferential: Dict[str, Any],
+    risk: Dict[str, Any],
+) -> Dict[str, Any]:
+    pct_change = parse_float(quote.get("percent_change"))
+    drivers = []
+    if pct_change is not None:
+        if pct_change >= 3:
+            direction = "rocketing"
+            drivers.append(f"Price is up {pct_change:.2f}% in the latest quote snapshot.")
+        elif pct_change <= -3:
+            direction = "falling"
+            drivers.append(f"Price is down {abs(pct_change):.2f}% in the latest quote snapshot.")
+        else:
+            direction = "stable"
+            drivers.append(f"Latest move is modest at {pct_change:.2f}%.")
+    else:
+        direction = "unknown"
+        drivers.append("Live price movement was not available from the fetched quote providers.")
+
+    latest_texts = [announcement_text(item) for item in announcements[:4]]
+    latest_texts.extend(f"{item.get('title', '')} {item.get('summary', '')}" for item in news_items[:6])
+    combined = clean_text(" ".join(latest_texts)).lower()
+    positives = sorted(term for term in MOVEMENT_UP_TERMS if term in combined)
+    negatives = sorted(term for term in MOVEMENT_DOWN_TERMS if term in combined)
+
+    if positives:
+        drivers.append(f"Positive triggers found: {', '.join(positives[:5])}.")
+    if negatives:
+        drivers.append(f"Negative triggers found: {', '.join(negatives[:5])}.")
+    if order_book.get("items"):
+        drivers.append(order_book["headline"])
+    if preferential.get("items"):
+        drivers.append("Preferential issue or warrant activity is present, so dilution and investor quality need review.")
+    if risk.get("level") in {"high", "medium"}:
+        drivers.append(f"Risk bucket is {risk.get('level')}: {risk.get('verdict')}.")
+
+    if direction == "rocketing":
+        summary = "The stock appears to be rising on a mix of price momentum and recent positive triggers."
+    elif direction == "falling":
+        summary = "The stock appears to be under pressure from price momentum and/or caution signals."
+    elif direction == "stable":
+        summary = "The stock is not making a large move in the latest quote snapshot."
+    else:
+        summary = "Movement could not be classified because quote movement was unavailable."
+
+    return {"direction": direction, "summary": summary, "drivers": drivers[:8]}
+
+
+def analyze_themes(
+    symbol: str,
+    quote: Dict[str, Any],
+    announcements: List[Dict[str, Any]],
+    news_items: List[Dict[str, Any]],
+    risk: Dict[str, Any],
+) -> Dict[str, Any]:
+    company_text = clean_text(
+        " ".join(
+            [
+                symbol,
+                str(quote.get("company", "")),
+                str(quote.get("industry", "")),
+                " ".join(announcement_text(item) for item in announcements[:8]),
+                " ".join(f"{item.get('title', '')} {item.get('summary', '')}" for item in news_items[:10]),
+            ]
+        )
+    ).lower()
+    buckets = []
+    for bucket_id, bucket in THEME_BUCKETS.items():
+        matched = [keyword for keyword in bucket["keywords"] if keyword in company_text]
+        if matched:
+            buckets.append(
+                {
+                    "id": bucket_id,
+                    "label": bucket["label"],
+                    "score": len(matched),
+                    "matched_terms": matched[:8],
+                    "summary": f"Matched theme terms: {', '.join(matched[:5])}.",
+                }
+            )
+    buckets.sort(key=lambda bucket: bucket["score"], reverse=True)
+
+    if not buckets:
+        assessment = "No clear futuristic theme was found from the fetched filings/news."
+        futuristic = "unclear"
+    elif risk.get("level") == "high":
+        assessment = "Theme exposure exists, but high-risk red flags weaken the futuristic-stock case."
+        futuristic = "risky"
+    elif buckets[0]["score"] >= 3:
+        assessment = f"Potential futuristic stock candidate in {buckets[0]['label']}, subject to valuation and execution checks."
+        futuristic = "potential"
+    else:
+        assessment = f"Some thematic exposure found in {buckets[0]['label']}, but evidence is still limited."
+        futuristic = "watch"
+
+    return {"futuristic": futuristic, "assessment": assessment, "buckets": buckets[:6]}
+
+
+def analyze_shareholding(quote: Dict[str, Any]) -> Dict[str, Any]:
+    shareholding = quote.get("shareholding") if isinstance(quote.get("shareholding"), dict) else {}
+    if not shareholding or not shareholding.get("available"):
+        return {
+            "available": False,
+            "summary": "Shareholding data was not available from the fetched provider payload.",
+            "categories": [],
+            "signals": ["Check the latest exchange shareholding pattern for promoter, FII, DII, public, and pledge trends."],
+            "note": "Shareholding analysis depends on provider availability; verify with official quarterly filings.",
+        }
+
+    categories = [
+        {"label": "Promoters", "value": shareholding.get("promoter_percent")},
+        {"label": "FII / FPI", "value": shareholding.get("fii_percent")},
+        {"label": "DII", "value": shareholding.get("dii_percent")},
+        {"label": "Public / Others", "value": shareholding.get("public_percent")},
+    ]
+    present = [item for item in categories if item["value"] is not None]
+    promoter = shareholding.get("promoter_percent")
+    fii = shareholding.get("fii_percent")
+    dii = shareholding.get("dii_percent")
+    if promoter is not None and promoter >= 50:
+        summary = "Promoter ownership appears strong; still check pledge and recent promoter transactions."
+    elif fii is not None and dii is not None and fii + dii >= 20:
+        summary = "Institutional ownership appears meaningful, led by FII/DII participation."
+    elif present:
+        summary = "Shareholding data is partially available; review latest quarterly pattern for trend changes."
+    else:
+        summary = "Shareholding categories were present but percentages could not be parsed reliably."
+
+    return {
+        "available": bool(present),
+        "summary": summary,
+        "categories": present,
+        "signals": shareholding.get("signals") or [],
+        "note": shareholding.get("note") or "Verify with latest official shareholding pattern filings.",
+    }
+
+
+def analyze_major_red_flags(
+    items: List[Dict[str, Any]],
+    preferential: Dict[str, Any],
+    risk: Dict[str, Any],
+) -> Dict[str, Any]:
+    flags = []
+    for bucket in risk.get("buckets", []):
+        if bucket.get("severity", 0) >= 2:
+            flags.append(
+                {
+                    "severity": "high" if bucket.get("severity", 0) >= 3 else "medium",
+                    "label": bucket.get("label", "Risk flag"),
+                    "summary": bucket.get("description", ""),
+                    "source": "Risk buckets",
+                }
+            )
+
+    seen_terms = set()
+    for item in items:
+        text = item.get("text", "").lower()
+        for term, label in MAJOR_RED_FLAG_TERMS.items():
+            if term in text and (term, item.get("title")) not in seen_terms:
+                seen_terms.add((term, item.get("title")))
+                flags.append(
+                    {
+                        "severity": "high" if term in {"default", "fraud", "insolvency", "sebi", "wilful defaulter"} else "medium",
+                        "label": label,
+                        "summary": snippet(item.get("text", "")),
+                        "source": item.get("source", ""),
+                        "date": item.get("date", ""),
+                        "url": item.get("url", ""),
+                    }
+                )
+    if preferential.get("items"):
+        flags.append(
+            {
+                "severity": "watch",
+                "label": "Potential dilution from preferential issue/warrants",
+                "summary": "Preferential allotments can fund growth, but they can also dilute existing shareholders.",
+                "source": "Preferential issue bucket",
+            }
+        )
+
+    major_flags = [flag for flag in flags if flag.get("severity") in {"high", "medium"}]
+    if major_flags:
+        summary = "Major red flags found."
+    elif flags:
+        summary = "Watch items found, but no major red flags in fetched filings/news."
+    else:
+        summary = "No major red flags found in fetched filings/news."
+
+    return {
+        "level": risk.get("level", "clear"),
+        "summary": summary,
+        "items": flags[:10],
+    }
+
+
+def analyze_dossier(
+    symbol: str,
+    quote: Dict[str, Any],
+    announcements: List[Dict[str, Any]],
+    news_items: List[Dict[str, Any]],
+    risk: Dict[str, Any],
+) -> Dict[str, Any]:
+    items = evidence_items(announcements, news_items)
+    order_book = analyze_order_book(items)
+    preferential = analyze_preferential_issues(items)
+    return {
+        "order_book": order_book,
+        "preferential_issues": preferential,
+        "movement": analyze_movement_drivers(quote, announcements, news_items, order_book, preferential, risk),
+        "themes": analyze_themes(symbol, quote, announcements, news_items, risk),
+        "technical": analyze_technical(symbol, quote),
+        "shareholding": analyze_shareholding(quote),
+        "red_flags": analyze_major_red_flags(items, preferential, risk),
+    }
+
+
 def recommendation(
     quote: Dict[str, Any],
     announcements: List[Dict[str, Any]],
@@ -1283,6 +2075,100 @@ def recommendation(
     }
 
 
+def compact_stock_context(context: Dict[str, Any]) -> Dict[str, Any]:
+    dossier = context.get("dossier", {})
+    return {
+        "symbol": context.get("symbol"),
+        "quote": context.get("quote", {}),
+        "recommendation": context.get("recommendation", {}),
+        "risk": context.get("risk", {}),
+        "order_book": dossier.get("order_book", {}),
+        "preferential_issues": dossier.get("preferential_issues", {}),
+        "movement": dossier.get("movement", {}),
+        "themes": dossier.get("themes", {}),
+        "technical": dossier.get("technical", {}),
+        "shareholding": dossier.get("shareholding", {}),
+        "red_flags": dossier.get("red_flags", {}),
+        "latest_announcements": [
+            {
+                "date": item.get("date"),
+                "source": item.get("source"),
+                "subject": item.get("subject"),
+                "summary": (item.get("summary") or {}).get("plain_english") if isinstance(item.get("summary"), dict) else "",
+            }
+            for item in context.get("announcements", [])[:5]
+        ],
+        "verified_news": [
+            {"source": item.get("source"), "title": item.get("title"), "summary": item.get("summary")}
+            for item in context.get("verified_news", [])[:5]
+        ],
+    }
+
+
+def deterministic_stock_answer(question: str, context: Dict[str, Any]) -> str:
+    compact = compact_stock_context(context)
+    recommendation_data = compact.get("recommendation", {})
+    risk = compact.get("risk", {})
+    movement = compact.get("movement", {})
+    technical = compact.get("technical", {})
+    themes = compact.get("themes", {})
+    order_book = compact.get("order_book", {})
+    shareholding = compact.get("shareholding", {})
+    red_flags = compact.get("red_flags", {})
+    parts = [
+        f"Question: {question}",
+        f"For {compact.get('symbol')}, the current signal is {recommendation_data.get('action', 'Hold / watch')} with {recommendation_data.get('confidence', 'low')} confidence.",
+        movement.get("summary", ""),
+        technical.get("summary", ""),
+        themes.get("assessment", ""),
+        order_book.get("headline", ""),
+        shareholding.get("summary", ""),
+        red_flags.get("summary", ""),
+        f"Risk verdict: {risk.get('verdict', 'No risk verdict available')}.",
+    ]
+    reasons = recommendation_data.get("reasons") or []
+    if reasons:
+        parts.append("Key reasons: " + " ".join(reasons[:4]))
+    parts.append("This is an informational answer, not financial advice. Verify filings, valuation, and position sizing before acting.")
+    return " ".join(part for part in parts if part)
+
+
+def openai_stock_answer(question: str, context: Dict[str, Any]) -> Optional[str]:
+    if not os.getenv("OPENAI_API_KEY") or OpenAI is None:
+        return None
+    client = OpenAI(timeout=18)
+    payload = compact_stock_context(context)
+    system_prompt = (
+        "You are a cautious Indian equities research assistant. Answer only from the provided JSON context. "
+        "Separate facts, inference, and risk. Do not invent financial data. Include a short disclaimer that this is not financial advice."
+    )
+    try:
+        response = client.responses.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
+            input=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps({"question": question, "context": payload})},
+            ],
+        )
+        return response.output_text
+    except Exception:
+        return None
+
+
+def answer_stock_question(symbol: str, question: str, bse_code: str = "") -> Dict[str, Any]:
+    context = stock_context(symbol, bse_code)
+    answer = openai_stock_answer(question, context)
+    source = "openai" if answer else "rules"
+    answer = answer or deterministic_stock_answer(question, context)
+    return {
+        "symbol": symbol,
+        "question": question,
+        "answer": answer,
+        "source": source,
+        "disclaimer": "Educational signal only, not financial advice.",
+    }
+
+
 def stock_context(symbol: str, bse_code: str = "", holding: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     quote: Dict[str, Any] = {"symbol": symbol}
     try:
@@ -1296,6 +2182,7 @@ def stock_context(symbol: str, bse_code: str = "", holding: Optional[Dict[str, A
     verified_news = fetch_verified_news(symbol, quote.get("company") or (holding or {}).get("company_name", ""))
     news_analysis = analyze_verified_news(verified_news)
     risk = analyze_risk(symbol, quote, announcements, holding)
+    dossier = analyze_dossier(symbol, quote, announcements, verified_news, risk)
     return {
         "symbol": symbol,
         "quote": quote,
@@ -1303,6 +2190,7 @@ def stock_context(symbol: str, bse_code: str = "", holding: Optional[Dict[str, A
         "verified_news": verified_news,
         "news_analysis": news_analysis,
         "risk": risk,
+        "dossier": dossier,
         "recommendation": recommendation(quote, announcements, holding, risk, news_analysis),
     }
 
@@ -1471,6 +2359,12 @@ def stock_insight(symbol: str, bse_code: str = Query("")) -> Dict[str, Any]:
     conn.close()
     holding_dict = row_to_portfolio(holding) if holding else None
     return stock_context(normalized, bse_code, holding_dict)
+
+
+@app.post("/api/stock/{symbol}/chat")
+def stock_chat(symbol: str, payload: StockChatIn) -> Dict[str, Any]:
+    normalized = normalize_symbol(symbol)
+    return answer_stock_question(normalized, clean_text(payload.question), payload.bse_code)
 
 
 @app.get("/api/portfolio/risks")

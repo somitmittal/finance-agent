@@ -2,6 +2,8 @@ const state = {
   portfolio: [],
   selected: null,
   activeTab: "summary",
+  currentSymbol: "",
+  currentBseCode: "",
   stockSearchTimer: null,
   stockSearchRequestId: 0,
   latestStockMatches: [],
@@ -150,6 +152,270 @@ function renderSummary(result) {
   `;
 }
 
+function renderDossier(dossier = {}) {
+  const orderBook = dossier.order_book || {};
+  const preferential = dossier.preferential_issues || {};
+  const movement = dossier.movement || {};
+  const themes = dossier.themes || {};
+  const redFlags = dossier.red_flags || {};
+  const technical = dossier.technical || {};
+  const shareholding = dossier.shareholding || {};
+
+  $("dossier").innerHTML = `
+    <div class="dossier-grid">
+      <section class="dossier-card">
+        <div class="dossier-card-head">
+          <span class="label">Order Book</span>
+          <strong>${escapeHtml(orderBook.headline || "No order data found")}</strong>
+        </div>
+        ${renderFyOrderBuckets(orderBook.yearly_totals || [])}
+        ${renderDossierItems(orderBook.items || [], "No order/contract wins found in fetched filings/news.")}
+        ${orderBook.note ? `<p class="small">${escapeHtml(orderBook.note)}</p>` : ""}
+      </section>
+
+      <section class="dossier-card">
+        <div class="dossier-card-head">
+          <span class="label">Preferential Issues</span>
+          <strong>${preferential.count ? `${preferential.count} issue update${preferential.count > 1 ? "s" : ""}` : "No preferential issue found"}</strong>
+        </div>
+        ${renderPreferentialIssues(preferential.items || [])}
+        ${preferential.note ? `<p class="small">${escapeHtml(preferential.note)}</p>` : ""}
+      </section>
+
+      <section class="dossier-card">
+        <div class="dossier-card-head">
+          <span class="label">Why Moving</span>
+          <strong>${escapeHtml(movement.summary || "No movement summary available")}</strong>
+          <span class="risk-badge ${movement.direction === "falling" ? "high" : movement.direction === "rocketing" ? "clear" : "low"}">${escapeHtml(
+            movement.direction || "unknown"
+          )}</span>
+        </div>
+        ${renderSimpleList(movement.drivers || [], "No movement drivers found.")}
+      </section>
+
+      <section class="dossier-card">
+        <div class="dossier-card-head">
+          <span class="label">Futuristic Themes</span>
+          <strong>${escapeHtml(themes.assessment || "No theme assessment available")}</strong>
+          <span class="risk-badge ${themes.futuristic === "potential" ? "clear" : themes.futuristic === "risky" ? "high" : "low"}">${escapeHtml(
+            themes.futuristic || "unclear"
+          )}</span>
+        </div>
+        ${renderThemeBuckets(themes.buckets || [])}
+      </section>
+
+      <section class="dossier-card">
+        <div class="dossier-card-head">
+          <span class="label">Technical Analysis</span>
+          <strong>${escapeHtml(technical.summary || "Technical analysis unavailable")}</strong>
+          <span class="risk-badge ${technical.bias === "bullish" ? "clear" : technical.bias === "bearish" ? "high" : "low"}">${escapeHtml(
+            technical.bias || "unknown"
+          )}</span>
+        </div>
+        ${renderTechnicalAnalysis(technical)}
+      </section>
+
+      <section class="dossier-card">
+        <div class="dossier-card-head">
+          <span class="label">Shareholding</span>
+          <strong>${escapeHtml(shareholding.summary || "Shareholding analysis unavailable")}</strong>
+        </div>
+        ${renderShareholding(shareholding)}
+      </section>
+
+      <section class="dossier-card wide ${redFlags.items?.length ? "high" : ""}">
+        <div class="dossier-card-head">
+          <span class="label">Major Red Flags</span>
+          <strong>${escapeHtml(redFlags.summary || "No red-flag scan available")}</strong>
+          <span class="risk-badge ${redFlags.level === "high" ? "high" : redFlags.level === "medium" ? "medium" : "clear"}">${escapeHtml(
+            redFlags.level || "clear"
+          )}</span>
+        </div>
+        ${renderRedFlags(redFlags.items || [])}
+      </section>
+    </div>
+  `;
+}
+
+function renderFyOrderBuckets(items) {
+  if (!items.length) return "";
+  return `
+    <div class="fy-grid">
+      ${items
+        .map(
+          (item) => `
+            <div class="fy-card">
+              <span>${escapeHtml(item.fy)}</span>
+              <strong>Rs ${money(item.total_crore)} cr</strong>
+              <small>${escapeHtml(item.item_count || 0)} updates${item.undisclosed_count ? `, ${escapeHtml(item.undisclosed_count)} undisclosed` : ""}</small>
+            </div>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderDossierItems(items, emptyText) {
+  if (!items.length) return `<div class="empty-block">${escapeHtml(emptyText)}</div>`;
+  return `
+    <div class="dossier-list">
+      ${items
+        .map(
+          (item) => `
+            <article class="dossier-item">
+              <div class="meta">
+                <span>${escapeHtml(item.source || "Source")}</span>
+                <span>${escapeHtml(item.fy || "")}</span>
+                <span>${escapeHtml(item.date || "")}</span>
+                <span>${escapeHtml(item.amount || "")}</span>
+              </div>
+              <strong>${escapeHtml(item.title || "Update")}</strong>
+              <p>${escapeHtml(item.summary || "")}</p>
+              ${item.url ? `<a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open source</a>` : ""}
+            </article>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderTechnicalAnalysis(technical = {}) {
+  if (!technical.available) {
+    return `<div class="empty-block">${escapeHtml(technical.summary || "Technical data unavailable.")}</div>`;
+  }
+  const levels = technical.levels || {};
+  const levelRows = [
+    ["Support", levels.support],
+    ["Resistance", levels.resistance],
+    ["Bullish Target", levels.bullish_target],
+    ["Bearish Target", levels.bearish_target],
+    ["20 DMA", levels.sma20],
+    ["50 DMA", levels.sma50],
+    ["200 DMA", levels.sma200],
+  ];
+  return `
+    <div class="level-grid">
+      ${levelRows
+        .map(
+          ([label, value]) => `
+            <div>
+              <span>${escapeHtml(label)}</span>
+              <strong>${value === null || value === undefined ? "-" : `Rs ${money(value)}`}</strong>
+            </div>
+          `
+        )
+        .join("")}
+    </div>
+    ${renderSimpleList(technical.signals || [], "No technical signals found.")}
+    ${technical.note ? `<p class="small">${escapeHtml(technical.note)}</p>` : ""}
+  `;
+}
+
+function renderShareholding(shareholding = {}) {
+  if (!shareholding.available) {
+    return `
+      <div class="empty-block">${escapeHtml(shareholding.summary || "Shareholding data unavailable.")}</div>
+      ${renderSimpleList(shareholding.signals || [], "Check latest exchange shareholding filings.")}
+    `;
+  }
+  return `
+    <div class="shareholding-grid">
+      ${(shareholding.categories || [])
+        .map(
+          (item) => `
+            <div>
+              <span>${escapeHtml(item.label)}</span>
+              <strong>${item.value === null || item.value === undefined ? "-" : `${Number(item.value).toFixed(2)}%`}</strong>
+            </div>
+          `
+        )
+        .join("")}
+    </div>
+    ${renderSimpleList(shareholding.signals || [], "No shareholding signals found.")}
+    ${shareholding.note ? `<p class="small">${escapeHtml(shareholding.note)}</p>` : ""}
+  `;
+}
+
+function renderPreferentialIssues(items) {
+  if (!items.length) return `<div class="empty-block">No preferential allotment, warrant, or preferential issue update found.</div>`;
+  return `
+    <div class="dossier-list">
+      ${items
+        .map(
+          (item) => `
+            <article class="dossier-item">
+              <div class="meta">
+                <span>${escapeHtml(item.source || "Source")}</span>
+                <span>${escapeHtml(item.date || "")}</span>
+              </div>
+              <strong>${escapeHtml(item.title || "Preferential issue update")}</strong>
+              <div class="bucket-tags">
+                ${(item.prices || []).map((price) => `<span>Price ${escapeHtml(price)}</span>`).join("")}
+                ${(item.amounts || []).map((amount) => `<span>${escapeHtml(amount)}</span>`).join("")}
+                ${!(item.prices || []).length && !(item.amounts || []).length ? "<span>Terms need filing review</span>" : ""}
+              </div>
+              <p>${escapeHtml(item.summary || "")}</p>
+              ${item.url ? `<a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open filing</a>` : ""}
+            </article>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderSimpleList(items, emptyText) {
+  if (!items.length) return `<div class="empty-block">${escapeHtml(emptyText)}</div>`;
+  return `<ul class="dossier-points">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+}
+
+function renderThemeBuckets(buckets) {
+  if (!buckets.length) return `<div class="empty-block">No clear theme bucket found from fetched filings/news.</div>`;
+  return `
+    <div class="theme-grid">
+      ${buckets
+        .map(
+          (bucket) => `
+            <article class="theme-card">
+              <strong>${escapeHtml(bucket.label)}</strong>
+              <p>${escapeHtml(bucket.summary || "")}</p>
+              <div class="bucket-tags">
+                ${(bucket.matched_terms || []).map((term) => `<span>${escapeHtml(term)}</span>`).join("")}
+              </div>
+            </article>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderRedFlags(items) {
+  if (!items.length) return `<div class="empty-block">No major red flags found in fetched filings/news.</div>`;
+  return `
+    <div class="dossier-list">
+      ${items
+        .map(
+          (item) => `
+            <article class="dossier-item ${escapeHtml(item.severity || "watch")}">
+              <div class="meta">
+                <span class="pill caution">${escapeHtml(item.severity || "watch")}</span>
+                <span>${escapeHtml(item.source || "Signal")}</span>
+                <span>${escapeHtml(item.date || "")}</span>
+              </div>
+              <strong>${escapeHtml(item.label || "Risk flag")}</strong>
+              <p>${escapeHtml(item.summary || "")}</p>
+              ${item.url ? `<a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open source</a>` : ""}
+            </article>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
 function renderVerifiedNews(items = [], analysis = {}) {
   const tone = analysis.tone || "mixed";
   $("verifiedNews").innerHTML = `
@@ -252,7 +518,15 @@ function setTab(name) {
   });
   document.querySelectorAll(".tab-view").forEach((view) => view.classList.add("hidden"));
   const target =
-    name === "risks" ? "riskBuckets" : name === "portfolioRisks" ? "portfolioRisk" : name === "news" ? "verifiedNews" : "summary";
+    name === "risks"
+      ? "riskBuckets"
+      : name === "portfolioRisks"
+        ? "portfolioRisk"
+        : name === "news"
+          ? "verifiedNews"
+          : name === "dossier"
+            ? "dossier"
+            : "summary";
   $(target).classList.remove("hidden");
   if (name === "portfolioRisks") {
     loadPortfolioRisks();
@@ -422,10 +696,14 @@ async function analyze(symbol, bseCode = "") {
   $("statusText").textContent = "Fetching latest exchange data";
   $("symbolInput").value = normalized;
   $("bseInput").value = bseCode || $("bseInput").value;
+  state.currentSymbol = normalized;
+  state.currentBseCode = bseCode || $("bseInput").value || "";
+  $("chatStockLabel").textContent = normalized;
   try {
     const params = bseCode ? `?bse_code=${encodeURIComponent(bseCode)}` : "";
     const result = await api(`/api/stock/${encodeURIComponent(normalized)}/insight${params}`);
     renderSummary(result);
+    renderDossier(result.dossier || {});
     renderVerifiedNews(result.verified_news || [], result.news_analysis || {});
     renderRiskBuckets(result.risk || {});
     renderAnnouncements(result.announcements || []);
@@ -434,9 +712,50 @@ async function analyze(symbol, bseCode = "") {
     $("statusText").textContent = "Fetch failed";
     $("summary").className = "summary empty";
     $("summary").textContent = error.message;
+    renderDossier({});
     renderVerifiedNews([], {});
     renderRiskBuckets({});
     renderAnnouncements([]);
+  }
+}
+
+function appendChatMessage(role, text, source = "") {
+  const existingEmpty = $("chatMessages").querySelector(".empty-block");
+  if (existingEmpty) {
+    $("chatMessages").innerHTML = "";
+  }
+  const article = document.createElement("article");
+  article.className = `chat-message ${role}`;
+  article.innerHTML = `
+    <strong>${role === "user" ? "You" : "Finance Agent"}${source ? ` (${escapeHtml(source)})` : ""}</strong>
+    <p>${escapeHtml(text)}</p>
+  `;
+  $("chatMessages").appendChild(article);
+  $("chatMessages").scrollTop = $("chatMessages").scrollHeight;
+}
+
+async function askStockQuestion(question) {
+  if (!state.currentSymbol) {
+    appendChatMessage("assistant", "Analyze a stock first, then ask a question about it.");
+    return;
+  }
+  appendChatMessage("user", question);
+  $("chatQuestion").value = "";
+  $("chatQuestion").disabled = true;
+  const submitButton = $("chatForm").querySelector("button");
+  submitButton.disabled = true;
+  try {
+    const result = await api(`/api/stock/${encodeURIComponent(state.currentSymbol)}/chat`, {
+      method: "POST",
+      body: JSON.stringify({ question, bse_code: state.currentBseCode }),
+    });
+    appendChatMessage("assistant", result.answer || "No answer returned.", result.source || "rules");
+  } catch (error) {
+    appendChatMessage("assistant", error.message);
+  } finally {
+    $("chatQuestion").disabled = false;
+    submitButton.disabled = false;
+    $("chatQuestion").focus();
   }
 }
 
@@ -546,6 +865,14 @@ $("portfolioForm").addEventListener("submit", async (event) => {
     await loadPortfolio();
   } catch (error) {
     alert(error.message);
+  }
+});
+
+$("chatForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const question = $("chatQuestion").value.trim();
+  if (question) {
+    askStockQuestion(question);
   }
 });
 

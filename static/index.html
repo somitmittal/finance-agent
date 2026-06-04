@@ -47,6 +47,7 @@
           <div class="panel-head">
             <div class="tabs" role="tablist" aria-label="Analysis views">
               <button class="tab active" type="button" data-tab="summary">Readout</button>
+              <button class="tab" type="button" data-tab="dossier">Dossier</button>
               <button class="tab" type="button" data-tab="news">Verified News</button>
               <button class="tab" type="button" data-tab="risks">Risk Buckets</button>
               <button class="tab" type="button" data-tab="portfolioRisks">Portfolio Risk</button>
@@ -54,6 +55,7 @@
             <span id="statusText">Waiting</span>
           </div>
           <div id="summary" class="tab-view summary empty">Enter a stock symbol to fetch the latest official announcements.</div>
+          <div id="dossier" class="tab-view dossier-view hidden"></div>
           <div id="verifiedNews" class="tab-view news-view hidden"></div>
           <div id="riskBuckets" class="tab-view risk-view hidden"></div>
           <div id="portfolioRisk" class="tab-view risk-view hidden">
@@ -89,6 +91,20 @@
             <button type="submit">Save Stock</button>
           </form>
           <div id="portfolioList" class="portfolio-list"></div>
+        </section>
+
+        <section class="panel chat-panel">
+          <div class="panel-head">
+            <h2>Ask About Stock</h2>
+            <span id="chatStockLabel">Search first</span>
+          </div>
+          <div id="chatMessages" class="chat-messages">
+            <div class="empty-block">Analyze a stock, then ask questions like “Should I avoid this?”, “What are the red flags?”, or “What is the bullish target?”</div>
+          </div>
+          <form id="chatForm" class="chat-form">
+            <textarea id="chatQuestion" rows="3" placeholder="Ask about the selected stock"></textarea>
+            <button type="submit">Ask</button>
+          </form>
         </section>
       </aside>
     </main>
