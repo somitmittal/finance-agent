@@ -46,19 +46,19 @@
         <section class="panel">
           <div class="panel-head">
             <div class="tabs" role="tablist" aria-label="Analysis views">
-              <button class="tab active" type="button" data-tab="summary">Readout</button>
-              <button class="tab" type="button" data-tab="dossier">Investor Analysis</button>
-              <button class="tab" type="button" data-tab="news">Verified News</button>
-              <button class="tab" type="button" data-tab="risks">Risk Buckets</button>
-              <button class="tab" type="button" data-tab="portfolioRisks">Portfolio Risk</button>
+              <button class="tab active" type="button" role="tab" aria-selected="true" data-tab="summary">Readout</button>
+              <button class="tab" type="button" role="tab" aria-selected="false" data-tab="dossier">Investor Analysis</button>
+              <button class="tab" type="button" role="tab" aria-selected="false" data-tab="news">Verified News</button>
+              <button class="tab" type="button" role="tab" aria-selected="false" data-tab="risks">Risk Buckets</button>
+              <button class="tab" type="button" role="tab" aria-selected="false" data-tab="portfolioRisks">Portfolio Risk</button>
             </div>
             <span id="statusText">Waiting</span>
           </div>
-          <div id="summary" class="tab-view summary empty">Enter a stock symbol to fetch the latest official announcements.</div>
-          <div id="dossier" class="tab-view dossier-view hidden"></div>
-          <div id="verifiedNews" class="tab-view news-view hidden"></div>
-          <div id="riskBuckets" class="tab-view risk-view hidden"></div>
-          <div id="portfolioRisk" class="tab-view risk-view hidden">
+          <div id="summary" class="tab-view summary empty" role="tabpanel">Enter a stock symbol to fetch the latest official announcements.</div>
+          <div id="dossier" class="tab-view dossier-view hidden" role="tabpanel"></div>
+          <div id="verifiedNews" class="tab-view news-view hidden" role="tabpanel"></div>
+          <div id="riskBuckets" class="tab-view risk-view hidden" role="tabpanel"></div>
+          <div id="portfolioRisk" class="tab-view risk-view hidden" role="tabpanel">
             <div class="empty-block">Add portfolio stocks, then scan risk buckets.</div>
           </div>
         </section>
@@ -77,6 +77,21 @@
           <div class="panel-head">
             <h2>Portfolio</h2>
             <button id="newStockBtn" class="ghost" title="Clear form">New</button>
+          </div>
+          <div id="authBox" class="auth-box">
+            <div>
+              <strong id="authStatus">Login to save your portfolio</strong>
+              <p class="small">Your saved stocks, average cost, and notes stay tied to your account.</p>
+            </div>
+            <form id="authForm" class="auth-form">
+              <input id="authEmail" type="email" placeholder="Email" autocomplete="email" />
+              <input id="authPassword" type="password" placeholder="Password" autocomplete="current-password" />
+              <div class="auth-actions">
+                <button type="submit">Login</button>
+                <button id="registerBtn" class="ghost" type="button">Register</button>
+                <button id="logoutBtn" class="danger hidden" type="button">Logout</button>
+              </div>
+            </form>
           </div>
           <form id="portfolioForm" class="portfolio-form">
             <input type="hidden" id="portfolioId" />

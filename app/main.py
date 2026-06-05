@@ -3,11 +3,13 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import email.utils
+import hashlib
 import html
 import io
 import json
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import xml.etree.ElementTree as ET
@@ -16,7 +18,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urljoin, urlparse
 
 import requests
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -92,6 +94,11 @@ class PortfolioOut(PortfolioIn):
     id: int
     created_at: str
     updated_at: str
+
+
+class AuthIn(BaseModel):
+    email: str = Field(..., min_length=3, max_length=180)
+    password: str = Field(..., min_length=6, max_length=200)
 
 
 class StockChatIn(BaseModel):
@@ -190,26 +197,191 @@ def db() -> sqlite3.Connection:
     DATA_DIR.mkdir(exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    return conn
+
+
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            salt TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    create_or_migrate_portfolio(conn)
+    conn.commit()
+
+
+def create_or_migrate_portfolio(conn: sqlite3.Connection) -> None:
+    existing = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'portfolio'").fetchone()
+    if not existing:
+        create_portfolio_table(conn)
+        return
+
+    columns = [row["name"] for row in conn.execute("PRAGMA table_info(portfolio)").fetchall()]
+    indexes = conn.execute("PRAGMA index_list(portfolio)").fetchall()
+    has_global_symbol_unique = any(
+        row["unique"] and "symbol" in [info["name"] for info in conn.execute(f"PRAGMA index_info({row['name']})").fetchall()]
+        and len(conn.execute(f"PRAGMA index_info({row['name']})").fetchall()) == 1
+        for row in indexes
+    )
+    if "user_id" in columns and not has_global_symbol_unique:
+        return
+
+    legacy_user_id = ensure_legacy_user(conn)
+    rows = conn.execute("SELECT * FROM portfolio").fetchall()
+    conn.execute("ALTER TABLE portfolio RENAME TO portfolio_legacy")
+    create_portfolio_table(conn)
+    for row in rows:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO portfolio
+                (user_id, symbol, company_name, bse_code, quantity, avg_price, thesis, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                legacy_user_id,
+                row["symbol"],
+                row["company_name"],
+                row["bse_code"],
+                row["quantity"],
+                row["avg_price"],
+                row["thesis"],
+                row["created_at"],
+                row["updated_at"],
+            ),
+        )
+    conn.execute("DROP TABLE portfolio_legacy")
+
+
+def create_portfolio_table(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS portfolio (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT NOT NULL UNIQUE,
+            user_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
             company_name TEXT DEFAULT '',
             bse_code TEXT DEFAULT '',
             quantity REAL DEFAULT 0,
             avg_price REAL DEFAULT 0,
             thesis TEXT DEFAULT '',
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            UNIQUE(user_id, symbol),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         )
         """
     )
-    return conn
+
+
+def ensure_legacy_user(conn: sqlite3.Connection) -> int:
+    email = "legacy@local"
+    row = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+    if row:
+        return int(row["id"])
+    salt = secrets.token_hex(16)
+    password_hash = hash_password(secrets.token_urlsafe(32), salt)
+    cursor = conn.execute(
+        "INSERT INTO users (email, password_hash, salt, created_at) VALUES (?, ?, ?, ?)",
+        (email, password_hash, salt, now_iso()),
+    )
+    return int(cursor.lastrowid)
 
 
 def row_to_portfolio(row: sqlite3.Row) -> Dict[str, Any]:
     return dict(row)
+
+
+def normalize_email(email: str) -> str:
+    cleaned = email.strip().lower()
+    if "@" not in cleaned or "." not in cleaned.split("@")[-1]:
+        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+    return cleaned
+
+
+def hash_password(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120_000).hex()
+
+
+def create_session(conn: sqlite3.Connection, user_id: int) -> str:
+    token = secrets.token_urlsafe(32)
+    conn.execute(
+        "INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)",
+        (token, user_id, now_iso()),
+    )
+    return token
+
+
+def public_user(row: sqlite3.Row) -> Dict[str, Any]:
+    return {"id": row["id"], "email": row["email"], "created_at": row["created_at"]}
+
+
+def auth_payload(user: sqlite3.Row, token: str) -> Dict[str, Any]:
+    return {"token": token, "user": public_user(user)}
+
+
+def bearer_token(authorization: Optional[str]) -> str:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Login required.")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="Invalid auth token.")
+    return token.strip()
+
+
+def current_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    token = bearer_token(authorization)
+    conn = db()
+    row = conn.execute(
+        """
+        SELECT users.*
+        FROM sessions
+        JOIN users ON users.id = sessions.user_id
+        WHERE sessions.token = ?
+        """,
+        (token,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=401, detail="Login required.")
+    return public_user(row)
+
+
+def optional_current_user(authorization: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not authorization:
+        return None
+    try:
+        token = bearer_token(authorization)
+    except HTTPException:
+        return None
+    conn = db()
+    row = conn.execute(
+        """
+        SELECT users.*
+        FROM sessions
+        JOIN users ON users.id = sessions.user_id
+        WHERE sessions.token = ?
+        """,
+        (token,),
+    ).fetchone()
+    conn.close()
+    return public_user(row) if row else None
 
 
 def http_session() -> requests.Session:
@@ -2272,26 +2444,76 @@ def search_stocks(q: str = Query("", min_length=0), limit: int = Query(50, ge=1,
     return {"query": query, "items": search_stock_master(query, limit)}
 
 
-@app.get("/api/portfolio", response_model=List[PortfolioOut])
-def list_portfolio() -> List[Dict[str, Any]]:
+@app.post("/api/auth/register")
+def register(payload: AuthIn) -> Dict[str, Any]:
+    email = normalize_email(payload.email)
+    salt = secrets.token_hex(16)
+    password_hash = hash_password(payload.password, salt)
     conn = db()
-    rows = conn.execute("SELECT * FROM portfolio ORDER BY symbol").fetchall()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO users (email, password_hash, salt, created_at) VALUES (?, ?, ?, ?)",
+            (email, password_hash, salt, now_iso()),
+        )
+        token = create_session(conn, int(cursor.lastrowid))
+        conn.commit()
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    except sqlite3.IntegrityError:
+        conn.close()
+        raise HTTPException(status_code=409, detail="An account already exists for this email.")
+    conn.close()
+    return auth_payload(user, token)
+
+
+@app.post("/api/auth/login")
+def login(payload: AuthIn) -> Dict[str, Any]:
+    email = normalize_email(payload.email)
+    conn = db()
+    user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+    if not user or hash_password(payload.password, user["salt"]) != user["password_hash"]:
+        conn.close()
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    token = create_session(conn, int(user["id"]))
+    conn.commit()
+    conn.close()
+    return auth_payload(user, token)
+
+
+@app.post("/api/auth/logout")
+def logout(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    token = bearer_token(authorization)
+    conn = db()
+    conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+def me(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    return {"user": user}
+
+
+@app.get("/api/portfolio", response_model=List[PortfolioOut])
+def list_portfolio(user: Dict[str, Any] = Depends(current_user)) -> List[Dict[str, Any]]:
+    conn = db()
+    rows = conn.execute("SELECT * FROM portfolio WHERE user_id = ? ORDER BY symbol", (user["id"],)).fetchall()
     conn.close()
     return [row_to_portfolio(row) for row in rows]
 
 
 @app.post("/api/portfolio", response_model=PortfolioOut)
-def add_portfolio(item: PortfolioIn) -> Dict[str, Any]:
+def add_portfolio(item: PortfolioIn, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     symbol = normalize_symbol(item.symbol)
     stamp = now_iso()
     conn = db()
     try:
         cursor = conn.execute(
             """
-            INSERT INTO portfolio (symbol, company_name, bse_code, quantity, avg_price, thesis, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO portfolio (user_id, symbol, company_name, bse_code, quantity, avg_price, thesis, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (symbol, item.company_name, item.bse_code, item.quantity, item.avg_price, item.thesis, stamp, stamp),
+            (user["id"], symbol, item.company_name, item.bse_code, item.quantity, item.avg_price, item.thesis, stamp, stamp),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM portfolio WHERE id = ?", (cursor.lastrowid,)).fetchone()
@@ -2303,19 +2525,23 @@ def add_portfolio(item: PortfolioIn) -> Dict[str, Any]:
 
 
 @app.put("/api/portfolio/{item_id}", response_model=PortfolioOut)
-def update_portfolio(item_id: int, item: PortfolioIn) -> Dict[str, Any]:
+def update_portfolio(item_id: int, item: PortfolioIn, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     symbol = normalize_symbol(item.symbol)
     conn = db()
-    conn.execute(
-        """
-        UPDATE portfolio
-        SET symbol = ?, company_name = ?, bse_code = ?, quantity = ?, avg_price = ?, thesis = ?, updated_at = ?
-        WHERE id = ?
-        """,
-        (symbol, item.company_name, item.bse_code, item.quantity, item.avg_price, item.thesis, now_iso(), item_id),
-    )
-    conn.commit()
-    row = conn.execute("SELECT * FROM portfolio WHERE id = ?", (item_id,)).fetchone()
+    try:
+        conn.execute(
+            """
+            UPDATE portfolio
+            SET symbol = ?, company_name = ?, bse_code = ?, quantity = ?, avg_price = ?, thesis = ?, updated_at = ?
+            WHERE id = ? AND user_id = ?
+            """,
+            (symbol, item.company_name, item.bse_code, item.quantity, item.avg_price, item.thesis, now_iso(), item_id, user["id"]),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM portfolio WHERE id = ? AND user_id = ?", (item_id, user["id"])).fetchone()
+    except sqlite3.IntegrityError:
+        conn.close()
+        raise HTTPException(status_code=409, detail="This symbol is already in your portfolio.")
     conn.close()
     if not row:
         raise HTTPException(status_code=404, detail="Portfolio item not found.")
@@ -2323,9 +2549,9 @@ def update_portfolio(item_id: int, item: PortfolioIn) -> Dict[str, Any]:
 
 
 @app.delete("/api/portfolio/{item_id}")
-def delete_portfolio(item_id: int) -> Dict[str, Any]:
+def delete_portfolio(item_id: int, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     conn = db()
-    cursor = conn.execute("DELETE FROM portfolio WHERE id = ?", (item_id,))
+    cursor = conn.execute("DELETE FROM portfolio WHERE id = ? AND user_id = ?", (item_id, user["id"]))
     conn.commit()
     conn.close()
     if cursor.rowcount == 0:
@@ -2361,12 +2587,15 @@ def stock_quote(symbol: str) -> Dict[str, Any]:
 
 
 @app.get("/api/stock/{symbol}/insight")
-def stock_insight(symbol: str, bse_code: str = Query("")) -> Dict[str, Any]:
+def stock_insight(symbol: str, bse_code: str = Query(""), authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
     normalized = normalize_symbol(symbol)
-    conn = db()
-    holding = conn.execute("SELECT * FROM portfolio WHERE symbol = ?", (normalized,)).fetchone()
-    conn.close()
-    holding_dict = row_to_portfolio(holding) if holding else None
+    user = optional_current_user(authorization)
+    holding_dict = None
+    if user:
+        conn = db()
+        holding = conn.execute("SELECT * FROM portfolio WHERE symbol = ? AND user_id = ?", (normalized, user["id"])).fetchone()
+        conn.close()
+        holding_dict = row_to_portfolio(holding) if holding else None
     return stock_context(normalized, bse_code, holding_dict)
 
 
@@ -2377,9 +2606,9 @@ def stock_chat(symbol: str, payload: StockChatIn) -> Dict[str, Any]:
 
 
 @app.get("/api/portfolio/risks")
-def portfolio_risks() -> Dict[str, Any]:
+def portfolio_risks(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     conn = db()
-    rows = conn.execute("SELECT * FROM portfolio ORDER BY symbol").fetchall()
+    rows = conn.execute("SELECT * FROM portfolio WHERE user_id = ? ORDER BY symbol", (user["id"],)).fetchall()
     conn.close()
     holdings = [row_to_portfolio(row) for row in rows]
     results = []

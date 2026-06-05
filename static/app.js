@@ -4,12 +4,42 @@ const state = {
   activeTab: "summary",
   currentSymbol: "",
   currentBseCode: "",
+  authToken: localStorage.getItem("financeAgentToken") || "",
+  user: null,
   stockSearchTimer: null,
   stockSearchRequestId: 0,
   latestStockMatches: [],
 };
 
 const $ = (id) => document.getElementById(id);
+
+const TAB_CONFIG = {
+  summary: {
+    target: "summary",
+    title: "Executive Readout",
+    subtitle: "Decision signal, confidence, latest filing summary, and the key reasons behind the recommendation.",
+  },
+  dossier: {
+    target: "dossier",
+    title: "Investor Analysis",
+    subtitle: "FY-wise order wins, preferential issues, technical setup, themes, shareholding, and red flags.",
+  },
+  news: {
+    target: "verifiedNews",
+    title: "Verified News",
+    subtitle: "Trusted publisher and official-source news filtered for actionable signals.",
+  },
+  risks: {
+    target: "riskBuckets",
+    title: "Risk Buckets",
+    subtitle: "Governance, regulatory, debt, promoter, disclosure, and price-stress checks.",
+  },
+  portfolioRisks: {
+    target: "portfolioRisk",
+    title: "Portfolio Risk Monitor",
+    subtitle: "Risk and recommendation scan across saved holdings.",
+  },
+};
 
 const STOCK_DIRECTORY = [
   { symbol: "RELIANCE", name: "Reliance Industries", bse: "500325" },
@@ -59,12 +89,19 @@ const STOCK_DIRECTORY = [
 ];
 
 async function api(path, options = {}) {
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (state.authToken) {
+    headers.Authorization = `Bearer ${state.authToken}`;
+  }
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
+    headers,
     ...options,
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
+    if (response.status === 401 && path !== "/api/auth/me") {
+      setAuth(null);
+    }
     throw new Error(payload.detail || `Request failed: ${response.status}`);
   }
   return response.json();
@@ -87,6 +124,96 @@ function escapeHtml(value) {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
+}
+
+function setAuth(payload) {
+  if (payload?.token && payload?.user) {
+    state.authToken = payload.token;
+    state.user = payload.user;
+    localStorage.setItem("financeAgentToken", payload.token);
+  } else {
+    state.authToken = "";
+    state.user = null;
+    localStorage.removeItem("financeAgentToken");
+  }
+  updateAuthUi();
+}
+
+function updateAuthUi() {
+  const loggedIn = Boolean(state.user);
+  $("authStatus").textContent = loggedIn ? `Logged in as ${state.user.email}` : "Login to save your portfolio";
+  $("authEmail").classList.toggle("hidden", loggedIn);
+  $("authPassword").classList.toggle("hidden", loggedIn);
+  $("authForm").querySelector('button[type="submit"]').classList.toggle("hidden", loggedIn);
+  $("registerBtn").classList.toggle("hidden", loggedIn);
+  $("logoutBtn").classList.toggle("hidden", !loggedIn);
+  document.querySelectorAll("#portfolioForm input, #portfolioForm textarea, #portfolioForm button").forEach((field) => {
+    field.disabled = !loggedIn;
+  });
+  if (!loggedIn) {
+    state.portfolio = [];
+    renderPortfolio();
+  }
+}
+
+async function restoreSession() {
+  updateAuthUi();
+  if (!state.authToken) return;
+  try {
+    const result = await api("/api/auth/me");
+    state.user = result.user;
+    updateAuthUi();
+    await loadPortfolio();
+  } catch (error) {
+    setAuth(null);
+  }
+}
+
+function viewHeader(tabName, eyebrow = "") {
+  const config = TAB_CONFIG[tabName] || TAB_CONFIG.summary;
+  return `
+    <div class="view-header">
+      <div>
+        <span class="label">${escapeHtml(eyebrow || (state.currentSymbol ? state.currentSymbol : "Workspace"))}</span>
+        <h2>${escapeHtml(config.title)}</h2>
+        <p>${escapeHtml(config.subtitle)}</p>
+      </div>
+      <span class="view-badge">${state.currentSymbol ? escapeHtml(state.currentSymbol) : "No stock selected"}</span>
+    </div>
+  `;
+}
+
+function emptyTab(tabName, message) {
+  const config = TAB_CONFIG[tabName] || TAB_CONFIG.summary;
+  $(config.target).innerHTML = `
+    ${viewHeader(tabName)}
+    <div class="empty-block">${escapeHtml(message || "Search a stock to populate this workspace.")}</div>
+  `;
+}
+
+function renderInitialWorkspaces() {
+  emptyTab("summary", "Search any NSE stock to generate a recommendation and executive readout.");
+  emptyTab("dossier", "Search a stock to see FY-wise order wins, technicals, shareholding, themes, and red flags.");
+  emptyTab("news", "Search a stock to fetch and filter trusted-publisher news.");
+  emptyTab("risks", "Search a stock to scan governance, debt, promoter, disclosure, and price-stress buckets.");
+  emptyTab("portfolioRisks", "Add portfolio stocks, then open this tab to scan holding-level risk.");
+}
+
+function renderLoadingWorkspaces(symbol) {
+  const loading = (tabName, message) => {
+    const config = TAB_CONFIG[tabName];
+    $(config.target).innerHTML = `
+      ${viewHeader(tabName, symbol)}
+      <div class="loading-state">
+        <span></span>
+        <p>${escapeHtml(message)}</p>
+      </div>
+    `;
+  };
+  loading("summary", "Building executive readout...");
+  loading("dossier", "Aggregating investor analysis buckets...");
+  loading("news", "Fetching verified news...");
+  loading("risks", "Scanning red-flag buckets...");
 }
 
 function recommendationLevel(action = "") {
@@ -134,6 +261,7 @@ function renderSummary(result) {
   if (!latest) {
     $("summary").className = "summary";
     $("summary").innerHTML = `
+      ${viewHeader("summary", result.symbol || state.currentSymbol)}
       ${renderRecommendationCard(rec)}
       <div class="empty-block">No latest NSE/BSE announcement found for this symbol.</div>
     `;
@@ -143,12 +271,18 @@ function renderSummary(result) {
   const summary = latest.summary || {};
   $("summary").className = "summary";
   $("summary").innerHTML = `
+    ${viewHeader("summary", result.symbol || state.currentSymbol)}
     ${renderRecommendationCard(rec)}
-    <h3>${escapeHtml(summary.headline || latest.subject)}</h3>
-    <p>${escapeHtml(summary.plain_english || "No readable summary available.")}</p>
-    <ul>
-      ${(summary.what_changed || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
-    </ul>
+    <section class="client-card">
+      <div class="client-card-head">
+        <span class="label">Latest Official Filing</span>
+        <strong>${escapeHtml(summary.headline || latest.subject)}</strong>
+      </div>
+      <p>${escapeHtml(summary.plain_english || "No readable summary available.")}</p>
+      <ul>
+        ${(summary.what_changed || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+      </ul>
+    </section>
   `;
 }
 
@@ -162,6 +296,7 @@ function renderDossier(dossier = {}) {
   const shareholding = dossier.shareholding || {};
 
   $("dossier").innerHTML = `
+    ${viewHeader("dossier")}
     <div class="dossier-grid">
       <section class="dossier-card wide highlight-card">
         <div class="dossier-card-head">
@@ -421,6 +556,7 @@ function renderRedFlags(items) {
 function renderVerifiedNews(items = [], analysis = {}) {
   const tone = analysis.tone || "mixed";
   $("verifiedNews").innerHTML = `
+    ${viewHeader("news")}
     <div class="risk-header">
       <div>
         <span class="label">Verified News Tone</span>
@@ -466,6 +602,7 @@ function renderRiskBuckets(risk = {}) {
   const level = risk.level || "clear";
 
   $("riskBuckets").innerHTML = `
+    ${viewHeader("risks")}
     <div class="risk-header">
       <div>
         <span class="label">Risk Verdict</span>
@@ -516,42 +653,49 @@ function renderBucket(bucket) {
 function setTab(name) {
   state.activeTab = name;
   document.querySelectorAll(".tab").forEach((button) => {
-    button.classList.toggle("active", button.dataset.tab === name);
+    const active = button.dataset.tab === name;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
   });
   document.querySelectorAll(".tab-view").forEach((view) => view.classList.add("hidden"));
-  const target =
-    name === "risks"
-      ? "riskBuckets"
-      : name === "portfolioRisks"
-        ? "portfolioRisk"
-        : name === "news"
-          ? "verifiedNews"
-          : name === "dossier"
-            ? "dossier"
-            : "summary";
+  const target = (TAB_CONFIG[name] || TAB_CONFIG.summary).target;
   $(target).classList.remove("hidden");
+  $("statusText").textContent = `${TAB_CONFIG[name]?.title || "Workspace"} active`;
   if (name === "portfolioRisks") {
     loadPortfolioRisks();
   }
 }
 
 async function loadPortfolioRisks() {
-  if (!state.portfolio.length) {
-    $("portfolioRisk").innerHTML = `<div class="empty-block">Add portfolio stocks, then scan risk buckets.</div>`;
+  if (!state.user) {
+    emptyTab("portfolioRisks", "Login to scan your saved portfolio risk.");
     return;
   }
-  $("portfolioRisk").innerHTML = `<div class="empty-block">Scanning portfolio risk buckets...</div>`;
+  if (!state.portfolio.length) {
+    emptyTab("portfolioRisks", "Add portfolio stocks, then scan risk buckets.");
+    return;
+  }
+  $("portfolioRisk").innerHTML = `
+    ${viewHeader("portfolioRisks")}
+    <div class="loading-state"><span></span><p>Scanning portfolio risk buckets...</p></div>
+  `;
   try {
     const result = await api("/api/portfolio/risks");
     renderPortfolioRisks(result.items || []);
   } catch (error) {
-    $("portfolioRisk").innerHTML = `<div class="empty-block">${escapeHtml(error.message)}</div>`;
+    $("portfolioRisk").innerHTML = `
+      ${viewHeader("portfolioRisks")}
+      <div class="empty-block">${escapeHtml(error.message)}</div>
+    `;
   }
 }
 
 function renderPortfolioRisks(items) {
-  $("portfolioRisk").innerHTML = items.length
-    ? items
+  $("portfolioRisk").innerHTML = `
+    ${viewHeader("portfolioRisks")}
+    ${
+      items.length
+        ? items
         .map((item) => {
           if (item.error) {
             return `
@@ -584,7 +728,9 @@ function renderPortfolioRisks(items) {
           `;
         })
         .join("")
-    : `<div class="empty-block">No holdings saved yet.</div>`;
+        : `<div class="empty-block">No holdings saved yet.</div>`
+    }
+  `;
 }
 
 function renderAnnouncements(items = []) {
@@ -711,6 +857,7 @@ async function analyze(symbol, bseCode = "") {
   state.currentSymbol = normalized;
   state.currentBseCode = bseCode || $("bseInput").value || "";
   $("chatStockLabel").textContent = normalized;
+  renderLoadingWorkspaces(normalized);
   try {
     const params = bseCode ? `?bse_code=${encodeURIComponent(bseCode)}` : "";
     const result = await api(`/api/stock/${encodeURIComponent(normalized)}/insight${params}`);
@@ -722,9 +869,12 @@ async function analyze(symbol, bseCode = "") {
     $("statusText").textContent = `Updated ${new Date().toLocaleTimeString()}`;
   } catch (error) {
     $("statusText").textContent = "Fetch failed";
-    $("summary").className = "summary empty";
-    $("summary").textContent = error.message;
-    renderDossier({});
+    $("summary").className = "summary";
+    $("summary").innerHTML = `
+      ${viewHeader("summary", normalized)}
+      <div class="empty-block">${escapeHtml(error.message)}</div>
+    `;
+    emptyTab("dossier", "Investor analysis could not be loaded for this stock.");
     renderVerifiedNews([], {});
     renderRiskBuckets({});
     renderAnnouncements([]);
@@ -792,7 +942,13 @@ function fillForm(item) {
 }
 
 function renderPortfolio() {
+  if (!state.user) {
+    $("portfolioList").innerHTML = `<div class="empty-block">Login or register to save, edit, and delete portfolio stocks.</div>`;
+    return;
+  }
   $("portfolioList").innerHTML = state.portfolio
+    .length
+    ? state.portfolio
     .map(
       (item) => `
       <article class="holding">
@@ -811,10 +967,15 @@ function renderPortfolio() {
       </article>
     `
     )
-    .join("");
+    .join("")
+    : `<div class="empty-block">No saved stocks yet. Add your first holding above.</div>`;
 }
 
 async function loadPortfolio() {
+  if (!state.user) {
+    renderPortfolio();
+    return;
+  }
   state.portfolio = await api("/api/portfolio");
   renderPortfolio();
   if (state.activeTab === "portfolioRisks") {
@@ -858,6 +1019,10 @@ document.addEventListener("click", (event) => {
 
 $("portfolioForm").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (!state.user) {
+    alert("Login or register to save portfolio stocks.");
+    return;
+  }
   const payload = {
     symbol: $("portfolioSymbol").value,
     company_name: $("companyName").value,
@@ -878,6 +1043,45 @@ $("portfolioForm").addEventListener("submit", async (event) => {
   } catch (error) {
     alert(error.message);
   }
+});
+
+$("authForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const result = await api("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email: $("authEmail").value, password: $("authPassword").value }),
+    });
+    setAuth(result);
+    $("authPassword").value = "";
+    await loadPortfolio();
+  } catch (error) {
+    alert(error.message);
+  }
+});
+
+$("registerBtn").addEventListener("click", async () => {
+  try {
+    const result = await api("/api/auth/register", {
+      method: "POST",
+      body: JSON.stringify({ email: $("authEmail").value, password: $("authPassword").value }),
+    });
+    setAuth(result);
+    $("authPassword").value = "";
+    await loadPortfolio();
+  } catch (error) {
+    alert(error.message);
+  }
+});
+
+$("logoutBtn").addEventListener("click", async () => {
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+  } catch (error) {
+    // Clear local state even if the server session is already gone.
+  }
+  clearForm();
+  setAuth(null);
 });
 
 $("chatForm").addEventListener("submit", (event) => {
@@ -907,6 +1111,8 @@ $("portfolioList").addEventListener("click", async (event) => {
 
 $("newStockBtn").addEventListener("click", clearForm);
 
-loadPortfolio().catch((error) => {
+renderInitialWorkspaces();
+setTab("summary");
+restoreSession().catch((error) => {
   $("portfolioList").innerHTML = `<div class="summary empty">${escapeHtml(error.message)}</div>`;
 });

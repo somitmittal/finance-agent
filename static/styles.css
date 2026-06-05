@@ -214,7 +214,8 @@ button:hover {
 }
 
 .tabs {
-  display: inline-flex;
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 4px;
   border: 1px solid var(--line);
@@ -225,17 +226,100 @@ button:hover {
 .tab {
   min-height: 34px;
   padding: 7px 10px;
+  border: 1px solid transparent;
   color: var(--muted);
   background: transparent;
 }
 
 .tab.active {
+  border-color: var(--accent);
   color: #fff;
   background: var(--accent);
+  box-shadow: 0 6px 14px rgba(13, 107, 95, 0.16);
 }
 
 .hidden {
   display: none !important;
+}
+
+.tab-view {
+  min-height: 360px;
+}
+
+.view-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: linear-gradient(135deg, #fbfcfa 0%, #eef7f4 100%);
+}
+
+.view-header h2 {
+  margin-bottom: 6px;
+  font-size: 24px;
+}
+
+.view-header p {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.view-badge {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border-radius: 999px;
+  color: var(--accent);
+  background: var(--soft);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.client-card {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.client-card-head {
+  display: grid;
+  gap: 4px;
+}
+
+.client-card-head strong {
+  font-size: 20px;
+}
+
+.loading-state {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: #fbfcfa;
+}
+
+.loading-state span {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .summary {
@@ -651,6 +735,36 @@ button:hover {
   display: grid;
   gap: 12px;
   padding: 16px;
+}
+
+.auth-box {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+  background: #fbfcfa;
+}
+
+.auth-form {
+  display: grid;
+  gap: 10px;
+}
+
+.auth-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.auth-actions button {
+  padding: 9px 10px;
+}
+
+button:disabled,
+input:disabled,
+textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .chat-panel {
