@@ -85,8 +85,8 @@ class PortfolioIn(BaseModel):
     symbol: str = Field(..., min_length=1, max_length=32)
     company_name: str = Field("", max_length=180)
     bse_code: str = Field("", max_length=16)
-    quantity: float = 0
-    avg_price: float = 0
+    quantity: float = Field(0, ge=0)
+    avg_price: float = Field(0, ge=0)
     thesis: str = Field("", max_length=1000)
 
 
@@ -114,6 +114,13 @@ def normalize_symbol(symbol: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9&.-]", "", symbol).upper().strip()
     if not cleaned:
         raise HTTPException(status_code=400, detail="Enter a valid stock symbol.")
+    return cleaned
+
+
+def normalize_bse_code(bse_code: str = "") -> str:
+    cleaned = str(bse_code or "").strip()
+    if cleaned and not re.fullmatch(r"\d{4,10}", cleaned):
+        raise HTTPException(status_code=400, detail="BSE code must contain only digits.")
     return cleaned
 
 
@@ -366,10 +373,7 @@ def current_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
 def optional_current_user(authorization: Optional[str]) -> Optional[Dict[str, Any]]:
     if not authorization:
         return None
-    try:
-        token = bearer_token(authorization)
-    except HTTPException:
-        return None
+    token = bearer_token(authorization)
     conn = db()
     row = conn.execute(
         """
@@ -381,7 +385,9 @@ def optional_current_user(authorization: Optional[str]) -> Optional[Dict[str, An
         (token,),
     ).fetchone()
     conn.close()
-    return public_user(row) if row else None
+    if not row:
+        raise HTTPException(status_code=401, detail="Invalid or expired auth token.")
+    return public_user(row)
 
 
 def http_session() -> requests.Session:
@@ -1125,15 +1131,17 @@ NEWS_NEGATIVE_TERMS = {
 }
 
 ORDER_KEYWORDS = {
-    "agreement",
     "award",
     "contract",
+    "customer agreement",
     "epc",
     "letter of acceptance",
     "letter of award",
     "loa",
     "order",
     "project",
+    "service agreement",
+    "supply agreement",
     "purchase order",
     "tender",
     "work order",
@@ -1142,9 +1150,15 @@ ORDER_KEYWORDS = {
 ORDER_EXCLUSION_TERMS = {
     "adjudication order",
     "court order",
+    "credit agreement",
+    "facility agreement",
+    "financing agreement",
     "interim order",
+    "loan agreement",
     "sebi order",
     "show cause",
+    "term loan",
+    "working capital facility",
 }
 
 PREFERENTIAL_KEYWORDS = {
@@ -1531,7 +1545,7 @@ def analyze_risk(
 
     if score >= 9 or any(bucket["severity"] == 3 for bucket in active_buckets[:2]):
         level = "high"
-        verdict = "Avoid / exit review"
+        verdict = "High-risk review signal"
     elif score >= 4:
         level = "medium"
         verdict = "Watch closely"
@@ -1700,6 +1714,14 @@ def has_any_term(text: str, terms: set[str]) -> bool:
     return any(term in lowered for term in terms)
 
 
+def has_phrase(text: str, phrase: str) -> bool:
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(phrase.lower())}(?![a-z0-9])", text.lower()))
+
+
+def has_any_phrase(text: str, terms: set[str]) -> bool:
+    return any(has_phrase(text, term) for term in terms)
+
+
 def parse_any_date(value: Any) -> Optional[dt.datetime]:
     text = str(value or "").strip()
     if not text:
@@ -1855,7 +1877,7 @@ def analyze_technical(symbol: str, quote: Dict[str, Any]) -> Dict[str, Any]:
             "bullish_target": round(bullish_target, 2),
             "bearish_target": round(max(0, bearish_target), 2),
         },
-        "note": "Targets are rule-based technical levels from recent support/resistance, not guaranteed outcomes.",
+        "note": "Scenario levels are rule-based from Yahoo daily prices and recent support/resistance. They are not price targets or guaranteed outcomes.",
     }
 
 
@@ -1865,7 +1887,7 @@ def analyze_order_book(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     for item in items:
         text = item.get("text", "")
         lowered = text.lower()
-        if not has_any_term(lowered, ORDER_KEYWORDS) or has_any_term(lowered, ORDER_EXCLUSION_TERMS):
+        if not has_any_phrase(lowered, ORDER_KEYWORDS) or has_any_phrase(lowered, ORDER_EXCLUSION_TERMS):
             continue
         amounts = money_mentions(text)
         best_amount = max(
@@ -1919,7 +1941,7 @@ def analyze_order_book(items: List[Dict[str, Any]]) -> Dict[str, Any]:
         "disclosed_order_value_crore": round(lifetime_total, 2) if lifetime_total else None,
         "yearly_totals": yearly_totals,
         "items": order_items[:8],
-        "note": "FY buckets aggregate fetched order/contract disclosures by Indian financial year; this is not the full audited order book unless every order was disclosed and fetched.",
+        "note": "FY buckets aggregate only fetched order/contract disclosures by Indian financial year. This is not the company's full audited order book unless every order was disclosed and fetched.",
     }
 
 
@@ -1960,7 +1982,7 @@ def analyze_movement_drivers(
     drivers = []
     if pct_change is not None:
         if pct_change >= 3:
-            direction = "rocketing"
+            direction = "upward move"
             drivers.append(f"Price is up {pct_change:.2f}% in the latest quote snapshot.")
         elif pct_change <= -3:
             direction = "falling"
@@ -1989,10 +2011,10 @@ def analyze_movement_drivers(
     if risk.get("level") in {"high", "medium"}:
         drivers.append(f"Risk bucket is {risk.get('level')}: {risk.get('verdict')}.")
 
-    if direction == "rocketing":
-        summary = "The stock appears to be rising on a mix of price momentum and recent positive triggers."
+    if direction == "upward move":
+        summary = "Possible positive drivers were found near the latest upward move; this is not proof of causality."
     elif direction == "falling":
-        summary = "The stock appears to be under pressure from price momentum and/or caution signals."
+        summary = "Possible caution drivers were found near the latest downward move; this is not proof of causality."
     elif direction == "stable":
         summary = "The stock is not making a large move in the latest quote snapshot."
     else:
@@ -2035,16 +2057,16 @@ def analyze_themes(
     buckets.sort(key=lambda bucket: bucket["score"], reverse=True)
 
     if not buckets:
-        assessment = "No clear futuristic theme was found from the fetched filings/news."
+        assessment = "No clear business/theme exposure was found from the fetched filings/news."
         futuristic = "unclear"
     elif risk.get("level") == "high":
-        assessment = "Theme exposure exists, but high-risk red flags weaken the futuristic-stock case."
+        assessment = "Theme mentions exist, but high-risk red flags weaken the long-term case."
         futuristic = "risky"
     elif buckets[0]["score"] >= 3:
-        assessment = f"Potential futuristic stock candidate in {buckets[0]['label']}, subject to valuation and execution checks."
+        assessment = f"Multiple mentions point to {buckets[0]['label']}; validate revenue exposure, order quality, valuation, and execution before relying on the theme."
         futuristic = "potential"
     else:
-        assessment = f"Some thematic exposure found in {buckets[0]['label']}, but evidence is still limited."
+        assessment = f"Some mentions found in {buckets[0]['label']}, but evidence is still limited."
         futuristic = "watch"
 
     return {"futuristic": futuristic, "assessment": assessment, "buckets": buckets[:6]}
@@ -2055,10 +2077,10 @@ def analyze_shareholding(quote: Dict[str, Any]) -> Dict[str, Any]:
     if not shareholding or not shareholding.get("available"):
         return {
             "available": False,
-            "summary": "Shareholding data was not available from the fetched provider payload.",
+            "summary": "Shareholding could not be parsed from provider data.",
             "categories": [],
             "signals": ["Check the latest exchange shareholding pattern for promoter, FII, DII, public, and pledge trends."],
-            "note": "Shareholding analysis depends on provider availability; verify with official quarterly filings.",
+            "note": "Open the latest official quarterly shareholding pattern before relying on ownership or pledge conclusions.",
         }
 
     categories = [
@@ -2071,7 +2093,10 @@ def analyze_shareholding(quote: Dict[str, Any]) -> Dict[str, Any]:
     promoter = shareholding.get("promoter_percent")
     fii = shareholding.get("fii_percent")
     dii = shareholding.get("dii_percent")
-    if promoter is not None and promoter >= 50:
+    total_known = sum(float(item["value"]) for item in present)
+    if len(present) >= 3 and not 90 <= total_known <= 110:
+        summary = "Shareholding percentages were parsed, but totals do not sanity-check near 100%; verify official filings."
+    elif promoter is not None and promoter >= 50:
         summary = "Promoter ownership appears strong; still check pledge and recent promoter transactions."
     elif fii is not None and dii is not None and fii + dii >= 20:
         summary = "Institutional ownership appears meaningful, led by FII/DII participation."
@@ -2085,7 +2110,7 @@ def analyze_shareholding(quote: Dict[str, Any]) -> Dict[str, Any]:
         "summary": summary,
         "categories": present,
         "signals": shareholding.get("signals") or [],
-        "note": shareholding.get("note") or "Verify with latest official shareholding pattern filings.",
+        "note": shareholding.get("note") or "Provider-parsed ownership data; verify with latest official shareholding pattern filings.",
     }
 
 
@@ -2201,28 +2226,28 @@ def recommendation(
     verified_news_count = int((news_analysis or {}).get("count") or 0)
     verified_news_score = int((news_analysis or {}).get("score") or 0)
     if risk_level == "high":
-        action = "Sell / avoid"
+        action = "High-risk review signal"
         reasons.append("High-risk governance, regulatory, debt, or price-stress bucket triggered.")
     elif risk_level == "medium":
-        action = "Hold / avoid fresh buy"
+        action = "Caution signal / additional review"
         reasons.append("Multiple risk buckets need review before adding fresh money.")
     elif news_score <= -2:
-        action = "Sell / reduce"
+        action = "Caution / reduce-risk review"
         reasons.append("Recent announcement language carries caution signals.")
     elif verified_news_score <= -2:
-        action = "Hold / reduce risk"
+        action = "Caution / reduce-risk review"
         reasons.append("Verified news coverage has a negative tilt.")
     elif news_score >= 4 and (pct_change is None or pct_change > -3):
-        action = "Buy / add only on valuation comfort"
+        action = "Constructive signal / valuation check"
         reasons.append("Recent filing signals look constructive, but valuation still needs a separate check.")
     elif verified_news_score >= 2 and risk_level in {"clear", "low"}:
-        action = "Buy / watch entry"
+        action = "Constructive signal / watchlist"
         reasons.append("Verified news tone is constructive and no major risk bucket is active.")
     elif unrealized_pct is not None and unrealized_pct < -12 and news_score <= 0:
         action = "Re-check thesis"
         reasons.append("The stock is materially below your cost without a strong positive filing trigger.")
     else:
-        action = "Hold / watch"
+        action = "Neutral signal / watch"
         reasons.append("Signals are mixed or not strong enough for a decisive action.")
 
     confidence_score = 35
@@ -2230,8 +2255,6 @@ def recommendation(
     confidence_score += min(20, verified_news_count * 2)
     if risk_level in {"high", "medium"}:
         confidence_score += min(15, risk_score * 2)
-    if action.startswith("Buy") and risk_level not in {"clear", "low"}:
-        confidence_score -= 20
     if not announcements and not verified_news_count:
         confidence_score -= 20
     confidence_score = max(15, min(95, confidence_score))
@@ -2251,7 +2274,7 @@ def recommendation(
         "confidence": confidence,
         "confidence_score": confidence_score,
         "reasons": reasons,
-        "disclaimer": "Educational signal only, not financial advice. Check valuation, risk, and your own suitability before trading.",
+        "disclaimer": "Decision-support signal only, not financial advice. The app does not yet include full fundamentals, valuation, peer comparison, or suitability checks.",
     }
 
 
@@ -2287,6 +2310,31 @@ def compact_stock_context(context: Dict[str, Any]) -> Dict[str, Any]:
 
 def deterministic_stock_answer(question: str, context: Dict[str, Any]) -> str:
     compact = compact_stock_context(context)
+    lowered_question = question.lower()
+    unsupported_terms = {
+        "cash flow",
+        "debt to equity",
+        "ebitda",
+        "eps",
+        "financials",
+        "margin",
+        "p/e",
+        "peer",
+        "pe ratio",
+        "profit",
+        "ratio",
+        "revenue",
+        "roe",
+        "roce",
+        "valuation",
+    }
+    if any(term in lowered_question for term in unsupported_terms):
+        return (
+            f"Question: {question} "
+            "That data is not available in the current scan. This portal currently uses fetched filings, trusted news, quote/price history, "
+            "portfolio cost basis, and provider shareholding payloads where available. For fundamentals, valuation, ratios, peer comparison, "
+            "cash flow, or leverage, open official financial statements and a valuation source before deciding. This is not financial advice."
+        )
     recommendation_data = compact.get("recommendation", {})
     risk = compact.get("risk", {})
     movement = compact.get("movement", {})
@@ -2297,7 +2345,7 @@ def deterministic_stock_answer(question: str, context: Dict[str, Any]) -> str:
     red_flags = compact.get("red_flags", {})
     parts = [
         f"Question: {question}",
-        f"For {compact.get('symbol')}, the current signal is {recommendation_data.get('action', 'Hold / watch')} with {recommendation_data.get('confidence', 'low')} confidence.",
+        f"For {compact.get('symbol')}, the current decision-support signal is {recommendation_data.get('action', 'Neutral signal / watch')} with {recommendation_data.get('confidence', 'low')} confidence.",
         movement.get("summary", ""),
         technical.get("summary", ""),
         themes.get("assessment", ""),
@@ -2309,7 +2357,7 @@ def deterministic_stock_answer(question: str, context: Dict[str, Any]) -> str:
     reasons = recommendation_data.get("reasons") or []
     if reasons:
         parts.append("Key reasons: " + " ".join(reasons[:4]))
-    parts.append("This is an informational answer, not financial advice. Verify filings, valuation, and position sizing before acting.")
+    parts.append("This is grounded only in the fetched context and is not financial advice. Verify filings, fundamentals, valuation, and position sizing before acting.")
     return " ".join(part for part in parts if part)
 
 
@@ -2320,7 +2368,10 @@ def openai_stock_answer(question: str, context: Dict[str, Any]) -> Optional[str]
     payload = compact_stock_context(context)
     system_prompt = (
         "You are a cautious Indian equities research assistant. Answer only from the provided JSON context. "
-        "Separate facts, inference, and risk. Do not invent financial data. Include a short disclaimer that this is not financial advice."
+        "Separate facts, inference, and risk. Do not invent financial, valuation, peer, or ownership data. "
+        "If the requested data is missing, say it is not available in the current scan. Cite the relevant context fields by name, "
+        "such as latest_announcements, verified_news, order_book, technical, shareholding, risk, or red_flags. "
+        "Do not give direct trade advice; frame answers as decision-support signals. Include a short disclaimer that this is not financial advice."
     )
     try:
         response = client.responses.create(
@@ -2505,6 +2556,7 @@ def list_portfolio(user: Dict[str, Any] = Depends(current_user)) -> List[Dict[st
 @app.post("/api/portfolio", response_model=PortfolioOut)
 def add_portfolio(item: PortfolioIn, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     symbol = normalize_symbol(item.symbol)
+    bse_code = normalize_bse_code(item.bse_code)
     stamp = now_iso()
     conn = db()
     try:
@@ -2513,7 +2565,7 @@ def add_portfolio(item: PortfolioIn, user: Dict[str, Any] = Depends(current_user
             INSERT INTO portfolio (user_id, symbol, company_name, bse_code, quantity, avg_price, thesis, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (user["id"], symbol, item.company_name, item.bse_code, item.quantity, item.avg_price, item.thesis, stamp, stamp),
+            (user["id"], symbol, item.company_name, bse_code, item.quantity, item.avg_price, item.thesis, stamp, stamp),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM portfolio WHERE id = ?", (cursor.lastrowid,)).fetchone()
@@ -2527,6 +2579,7 @@ def add_portfolio(item: PortfolioIn, user: Dict[str, Any] = Depends(current_user
 @app.put("/api/portfolio/{item_id}", response_model=PortfolioOut)
 def update_portfolio(item_id: int, item: PortfolioIn, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     symbol = normalize_symbol(item.symbol)
+    bse_code = normalize_bse_code(item.bse_code)
     conn = db()
     try:
         conn.execute(
@@ -2535,7 +2588,7 @@ def update_portfolio(item_id: int, item: PortfolioIn, user: Dict[str, Any] = Dep
             SET symbol = ?, company_name = ?, bse_code = ?, quantity = ?, avg_price = ?, thesis = ?, updated_at = ?
             WHERE id = ? AND user_id = ?
             """,
-            (symbol, item.company_name, item.bse_code, item.quantity, item.avg_price, item.thesis, now_iso(), item_id, user["id"]),
+            (symbol, item.company_name, bse_code, item.quantity, item.avg_price, item.thesis, now_iso(), item_id, user["id"]),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM portfolio WHERE id = ? AND user_id = ?", (item_id, user["id"])).fetchone()
@@ -2562,7 +2615,7 @@ def delete_portfolio(item_id: int, user: Dict[str, Any] = Depends(current_user))
 @app.get("/api/stock/{symbol}/announcements")
 def stock_announcements(symbol: str, bse_code: str = Query("")) -> Dict[str, Any]:
     normalized = normalize_symbol(symbol)
-    items = combined_announcements(normalized, bse_code)
+    items = combined_announcements(normalized, normalize_bse_code(bse_code))
     return {"symbol": normalized, "announcements": items}
 
 
@@ -2589,6 +2642,7 @@ def stock_quote(symbol: str) -> Dict[str, Any]:
 @app.get("/api/stock/{symbol}/insight")
 def stock_insight(symbol: str, bse_code: str = Query(""), authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
     normalized = normalize_symbol(symbol)
+    normalized_bse = normalize_bse_code(bse_code)
     user = optional_current_user(authorization)
     holding_dict = None
     if user:
@@ -2596,13 +2650,13 @@ def stock_insight(symbol: str, bse_code: str = Query(""), authorization: Optiona
         holding = conn.execute("SELECT * FROM portfolio WHERE symbol = ? AND user_id = ?", (normalized, user["id"])).fetchone()
         conn.close()
         holding_dict = row_to_portfolio(holding) if holding else None
-    return stock_context(normalized, bse_code, holding_dict)
+    return stock_context(normalized, normalized_bse, holding_dict)
 
 
 @app.post("/api/stock/{symbol}/chat")
 def stock_chat(symbol: str, payload: StockChatIn) -> Dict[str, Any]:
     normalized = normalize_symbol(symbol)
-    return answer_stock_question(normalized, clean_text(payload.question), payload.bse_code)
+    return answer_stock_question(normalized, clean_text(payload.question), normalize_bse_code(payload.bse_code))
 
 
 @app.get("/api/portfolio/risks")

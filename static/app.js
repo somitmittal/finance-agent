@@ -6,6 +6,8 @@ const state = {
   currentBseCode: "",
   authToken: localStorage.getItem("financeAgentToken") || "",
   user: null,
+  analysisRequestId: 0,
+  chatRequestId: 0,
   stockSearchTimer: null,
   stockSearchRequestId: 0,
   latestStockMatches: [],
@@ -17,12 +19,12 @@ const TAB_CONFIG = {
   summary: {
     target: "summary",
     title: "Executive Readout",
-    subtitle: "Decision signal, confidence, latest filing summary, and the key reasons behind the recommendation.",
+    subtitle: "Decision-support signal, confidence, latest filing summary, and key evidence. Not financial advice.",
   },
   dossier: {
     target: "dossier",
     title: "Investor Analysis",
-    subtitle: "FY-wise order wins, preferential issues, technical setup, themes, shareholding, and red flags.",
+    subtitle: "Fetched FY order disclosures, preferential issues, technical setup, theme mentions, shareholding, and red flags.",
   },
   news: {
     target: "verifiedNews",
@@ -216,11 +218,37 @@ function renderLoadingWorkspaces(symbol) {
   loading("risks", "Scanning red-flag buckets...");
 }
 
+function resetInsightStrip(symbol = "") {
+  $("actionText").textContent = symbol ? `Analyzing ${symbol}` : "Search a stock";
+  $("confidenceText").textContent = "-";
+  $("priceText").textContent = "-";
+  $("moveText").textContent = "-";
+}
+
+function resetChatForStock(symbol) {
+  state.chatRequestId += 1;
+  $("chatMessages").innerHTML = `
+    <div class="empty-block">Ask questions about ${escapeHtml(symbol)}, such as “What are the red flags?”, “What are the upside/downside scenario levels?”, or “What possible drivers were found?”</div>
+  `;
+}
+
+function setTabViewClasses(viewId, baseClasses) {
+  const view = $(viewId);
+  const wasHidden = view.classList.contains("hidden");
+  view.className = `${baseClasses}${wasHidden ? " hidden" : ""}`;
+}
+
+function setAnalyzeLoading(isLoading) {
+  const button = $("searchForm").querySelector("button");
+  button.disabled = isLoading;
+  button.textContent = isLoading ? "Analyzing..." : "Analyze";
+}
+
 function recommendationLevel(action = "") {
   const normalized = action.toLowerCase();
-  if (normalized.includes("sell") || normalized.includes("avoid")) return "high";
-  if (normalized.includes("reduce") || normalized.includes("re-check")) return "medium";
-  if (normalized.includes("buy")) return "clear";
+  if (normalized.includes("high-risk")) return "high";
+  if (normalized.includes("caution") || normalized.includes("re-check")) return "medium";
+  if (normalized.includes("constructive")) return "clear";
   return "low";
 }
 
@@ -231,8 +259,8 @@ function renderRecommendationCard(rec = {}) {
     <section class="recommendation-card ${level}">
       <div class="recommendation-head">
         <div>
-          <span class="label">Recommendation</span>
-          <strong>${escapeHtml(rec.action || "Hold / watch")}</strong>
+          <span class="label">Decision-Support Signal</span>
+          <strong>${escapeHtml(rec.action || "Neutral signal / watch")}</strong>
         </div>
         <span class="risk-badge ${level}">${escapeHtml(
           rec.confidence_score ? `${rec.confidence || "confidence"} ${rec.confidence_score}%` : rec.confidence || "low confidence"
@@ -259,7 +287,7 @@ function renderSummary(result) {
   $("moveText").textContent = pct(quote.percent_change);
 
   if (!latest) {
-    $("summary").className = "summary";
+    setTabViewClasses("summary", "tab-view summary");
     $("summary").innerHTML = `
       ${viewHeader("summary", result.symbol || state.currentSymbol)}
       ${renderRecommendationCard(rec)}
@@ -269,7 +297,7 @@ function renderSummary(result) {
   }
 
   const summary = latest.summary || {};
-  $("summary").className = "summary";
+  setTabViewClasses("summary", "tab-view summary");
   $("summary").innerHTML = `
     ${viewHeader("summary", result.symbol || state.currentSymbol)}
     ${renderRecommendationCard(rec)}
@@ -300,7 +328,7 @@ function renderDossier(dossier = {}) {
     <div class="dossier-grid">
       <section class="dossier-card wide highlight-card">
         <div class="dossier-card-head">
-          <span class="label">Consolidated Order Book (FY-wise)</span>
+          <span class="label">Fetched Order / Contract Disclosures by FY</span>
           <strong>${escapeHtml(orderBook.headline || "No order data found")}</strong>
         </div>
         ${renderFyOrderBuckets(orderBook.yearly_totals || [])}
@@ -319,9 +347,9 @@ function renderDossier(dossier = {}) {
 
       <section class="dossier-card">
         <div class="dossier-card-head">
-          <span class="label">Why Moving</span>
+          <span class="label">Possible Move Drivers</span>
           <strong>${escapeHtml(movement.summary || "No movement summary available")}</strong>
-          <span class="risk-badge ${movement.direction === "falling" ? "high" : movement.direction === "rocketing" ? "clear" : "low"}">${escapeHtml(
+          <span class="risk-badge ${movement.direction === "falling" ? "high" : movement.direction === "upward move" ? "clear" : "low"}">${escapeHtml(
             movement.direction || "unknown"
           )}</span>
         </div>
@@ -330,7 +358,7 @@ function renderDossier(dossier = {}) {
 
       <section class="dossier-card">
         <div class="dossier-card-head">
-          <span class="label">Futuristic Themes</span>
+          <span class="label">Detected Business / Theme Mentions</span>
           <strong>${escapeHtml(themes.assessment || "No theme assessment available")}</strong>
           <span class="risk-badge ${themes.futuristic === "potential" ? "clear" : themes.futuristic === "risky" ? "high" : "low"}">${escapeHtml(
             themes.futuristic || "unclear"
@@ -341,7 +369,7 @@ function renderDossier(dossier = {}) {
 
       <section class="dossier-card">
         <div class="dossier-card-head">
-          <span class="label">Technical Analysis</span>
+          <span class="label">Technical Scenario Analysis</span>
           <strong>${escapeHtml(technical.summary || "Technical analysis unavailable")}</strong>
           <span class="risk-badge ${technical.bias === "bullish" ? "clear" : technical.bias === "bearish" ? "high" : "low"}">${escapeHtml(
             technical.bias || "unknown"
@@ -374,7 +402,7 @@ function renderDossier(dossier = {}) {
 
 function renderFyOrderBuckets(items) {
   if (!items.length) {
-    return `<div class="empty-block">No FY-wise disclosed order value could be calculated from the fetched exchange filings/news.</div>`;
+    return `<div class="empty-block">No FY-wise disclosed order value could be calculated from fetched exchange filings/news.</div>`;
   }
   return `
     <div class="fy-grid">
@@ -426,8 +454,8 @@ function renderTechnicalAnalysis(technical = {}) {
   const levelRows = [
     ["Support", levels.support],
     ["Resistance", levels.resistance],
-    ["Bullish Target", levels.bullish_target],
-    ["Bearish Target", levels.bearish_target],
+    ["Upside Scenario Level", levels.bullish_target],
+    ["Downside Scenario Level", levels.bearish_target],
     ["20 DMA", levels.sma20],
     ["50 DMA", levels.sma50],
     ["200 DMA", levels.sma200],
@@ -530,7 +558,7 @@ function renderThemeBuckets(buckets) {
 }
 
 function renderRedFlags(items) {
-  if (!items.length) return `<div class="empty-block">No major red flags found in fetched filings/news.</div>`;
+  if (!items.length) return `<div class="empty-block">No major red flags detected in this limited fetched-source scan.</div>`;
   return `
     <div class="dossier-list">
       ${items
@@ -850,6 +878,8 @@ function selectedSearchMatch(value) {
 async function analyze(symbol, bseCode = "") {
   const normalized = symbol.trim().toUpperCase();
   if (!normalized) return;
+  const requestId = ++state.analysisRequestId;
+  const previousSymbol = state.currentSymbol;
   hideSearchRecommendations();
   $("statusText").textContent = "Fetching latest exchange data";
   $("symbolInput").value = normalized;
@@ -857,10 +887,17 @@ async function analyze(symbol, bseCode = "") {
   state.currentSymbol = normalized;
   state.currentBseCode = bseCode || $("bseInput").value || "";
   $("chatStockLabel").textContent = normalized;
+  if (previousSymbol !== normalized) {
+    resetChatForStock(normalized);
+  }
+  resetInsightStrip(normalized);
+  renderAnnouncements([]);
+  setAnalyzeLoading(true);
   renderLoadingWorkspaces(normalized);
   try {
     const params = bseCode ? `?bse_code=${encodeURIComponent(bseCode)}` : "";
     const result = await api(`/api/stock/${encodeURIComponent(normalized)}/insight${params}`);
+    if (requestId !== state.analysisRequestId) return;
     renderSummary(result);
     renderDossier(result.dossier || {});
     renderVerifiedNews(result.verified_news || [], result.news_analysis || {});
@@ -868,8 +905,10 @@ async function analyze(symbol, bseCode = "") {
     renderAnnouncements(result.announcements || []);
     $("statusText").textContent = `Updated ${new Date().toLocaleTimeString()}`;
   } catch (error) {
+    if (requestId !== state.analysisRequestId) return;
     $("statusText").textContent = "Fetch failed";
-    $("summary").className = "summary";
+    resetInsightStrip(normalized);
+    setTabViewClasses("summary", "tab-view summary");
     $("summary").innerHTML = `
       ${viewHeader("summary", normalized)}
       <div class="empty-block">${escapeHtml(error.message)}</div>
@@ -878,6 +917,10 @@ async function analyze(symbol, bseCode = "") {
     renderVerifiedNews([], {});
     renderRiskBuckets({});
     renderAnnouncements([]);
+  } finally {
+    if (requestId === state.analysisRequestId) {
+      setAnalyzeLoading(false);
+    }
   }
 }
 
@@ -901,18 +944,23 @@ async function askStockQuestion(question) {
     appendChatMessage("assistant", "Analyze a stock first, then ask a question about it.");
     return;
   }
+  const requestId = ++state.chatRequestId;
+  const symbol = state.currentSymbol;
+  const bseCode = state.currentBseCode;
   appendChatMessage("user", question);
   $("chatQuestion").value = "";
   $("chatQuestion").disabled = true;
   const submitButton = $("chatForm").querySelector("button");
   submitButton.disabled = true;
   try {
-    const result = await api(`/api/stock/${encodeURIComponent(state.currentSymbol)}/chat`, {
+    const result = await api(`/api/stock/${encodeURIComponent(symbol)}/chat`, {
       method: "POST",
-      body: JSON.stringify({ question, bse_code: state.currentBseCode }),
+      body: JSON.stringify({ question, bse_code: bseCode }),
     });
+    if (requestId !== state.chatRequestId || symbol !== state.currentSymbol || bseCode !== state.currentBseCode) return;
     appendChatMessage("assistant", result.answer || "No answer returned.", result.source || "rules");
   } catch (error) {
+    if (requestId !== state.chatRequestId || symbol !== state.currentSymbol || bseCode !== state.currentBseCode) return;
     appendChatMessage("assistant", error.message);
   } finally {
     $("chatQuestion").disabled = false;
@@ -1104,6 +1152,10 @@ $("portfolioList").addEventListener("click", async (event) => {
     analyze(item.symbol, item.bse_code);
   }
   if (button.dataset.action === "delete") {
+    const confirmed = window.confirm(`Delete ${item.symbol} from your portfolio?`);
+    if (!confirmed) return;
+    button.disabled = true;
+    button.textContent = "Deleting...";
     await api(`/api/portfolio/${item.id}`, { method: "DELETE" });
     await loadPortfolio();
   }
