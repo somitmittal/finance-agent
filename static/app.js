@@ -163,9 +163,9 @@ function renderDossier(dossier = {}) {
 
   $("dossier").innerHTML = `
     <div class="dossier-grid">
-      <section class="dossier-card">
+      <section class="dossier-card wide highlight-card">
         <div class="dossier-card-head">
-          <span class="label">Order Book</span>
+          <span class="label">Consolidated Order Book (FY-wise)</span>
           <strong>${escapeHtml(orderBook.headline || "No order data found")}</strong>
         </div>
         ${renderFyOrderBuckets(orderBook.yearly_totals || [])}
@@ -238,7 +238,9 @@ function renderDossier(dossier = {}) {
 }
 
 function renderFyOrderBuckets(items) {
-  if (!items.length) return "";
+  if (!items.length) {
+    return `<div class="empty-block">No FY-wise disclosed order value could be calculated from the fetched exchange filings/news.</div>`;
+  }
   return `
     <div class="fy-grid">
       ${items
@@ -246,8 +248,8 @@ function renderFyOrderBuckets(items) {
           (item) => `
             <div class="fy-card">
               <span>${escapeHtml(item.fy)}</span>
-              <strong>Rs ${money(item.total_crore)} cr</strong>
-              <small>${escapeHtml(item.item_count || 0)} updates${item.undisclosed_count ? `, ${escapeHtml(item.undisclosed_count)} undisclosed` : ""}</small>
+              <strong>Rs ${money(item.total_crore)} crore</strong>
+              <small>${escapeHtml(item.item_count || 0)} order update${item.item_count === 1 ? "" : "s"}${item.undisclosed_count ? `, ${escapeHtml(item.undisclosed_count)} value undisclosed` : ""}</small>
             </div>
           `
         )
@@ -635,26 +637,35 @@ function hideSearchRecommendations() {
   $("searchRecommendations").innerHTML = "";
 }
 
+function renderSearchLoading(query) {
+  $("searchRecommendations").classList.remove("hidden");
+  $("searchRecommendations").innerHTML = `
+    <div class="search-recommendation-status">Searching tickers for "${escapeHtml(query)}"...</div>
+  `;
+}
+
 function renderSearchRecommendations(matches) {
   state.latestStockMatches = matches;
   if (!matches.length) {
-    hideSearchRecommendations();
+    $("searchRecommendations").classList.remove("hidden");
+    $("searchRecommendations").innerHTML = `<div class="search-recommendation-status">No matching tickers found.</div>`;
     return;
   }
   $("searchRecommendations").classList.remove("hidden");
-  $("searchRecommendations").innerHTML = matches
-    .map(
-      (stock) => {
-        const bseCode = stock.bse_code || stock.bse || "";
-        return `
+  $("searchRecommendations").innerHTML = `
+    <div class="search-recommendation-status">Showing ${matches.length} matching ticker${matches.length === 1 ? "" : "s"}</div>
+    ${matches
+      .map((stock) => {
+          const bseCode = stock.bse_code || stock.bse || "";
+          return `
         <button type="button" class="search-recommendation" data-symbol="${escapeHtml(stock.symbol)}" data-bse="${escapeHtml(bseCode)}">
           <strong>${escapeHtml(stock.name)}</strong>
           <span>${escapeHtml(stock.symbol)}${stock.series ? ` | ${escapeHtml(stock.series)}` : ""}${bseCode ? ` | BSE ${escapeHtml(bseCode)}` : ""}</span>
         </button>
       `;
-      }
-    )
-    .join("");
+        })
+        .join("")}
+  `;
 }
 
 function loadStockRecommendations(query) {
@@ -666,9 +677,10 @@ function loadStockRecommendations(query) {
   }
 
   const requestId = ++state.stockSearchRequestId;
+  renderSearchLoading(trimmed);
   state.stockSearchTimer = setTimeout(async () => {
     try {
-      const result = await api(`/api/stocks/search?q=${encodeURIComponent(trimmed)}&limit=10`);
+      const result = await api(`/api/stocks/search?q=${encodeURIComponent(trimmed)}&limit=50`);
       if (requestId === state.stockSearchRequestId) {
         renderSearchRecommendations(result.items || []);
       }

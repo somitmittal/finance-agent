@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -169,13 +170,20 @@ def search_stock_master(query: str, limit: int = 10) -> List[Dict[str, Any]]:
     except Exception:
         items = STOCK_SEARCH_FALLBACK
 
-    scored = [
-        {**stock, "score": stock_search_score(query, stock)}
-        for stock in items
-        if stock_search_score(query, stock) > 0
-    ]
+    scored = []
+    for stock in items:
+        score = stock_search_score(query, stock)
+        if score > 0:
+            scored.append({**stock, "score": score})
     scored.sort(key=lambda stock: (-stock["score"], stock.get("name", "")))
     return [{key: stock.get(key, "") for key in ("symbol", "name", "series", "bse_code")} for stock in scored[:limit]]
+
+
+def warm_stock_master_cache() -> None:
+    try:
+        fetch_nse_stock_master()
+    except Exception:
+        pass
 
 
 def db() -> sqlite3.Connection:
@@ -2237,6 +2245,7 @@ def combined_announcements(symbol: str, bse_code: str = "") -> List[Dict[str, An
 @app.on_event("startup")
 def startup() -> None:
     db().close()
+    threading.Thread(target=warm_stock_master_cache, daemon=True).start()
 
 
 @app.get("/health")
@@ -2256,7 +2265,7 @@ def index() -> FileResponse:
 
 
 @app.get("/api/stocks/search")
-def search_stocks(q: str = Query("", min_length=0), limit: int = Query(10, ge=1, le=25)) -> Dict[str, Any]:
+def search_stocks(q: str = Query("", min_length=0), limit: int = Query(50, ge=1, le=100)) -> Dict[str, Any]:
     query = clean_text(q)
     if len(query) < 2:
         return {"query": query, "items": []}

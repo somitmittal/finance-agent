@@ -74,11 +74,23 @@ h2 {
   top: calc(100% + 6px);
   right: 0;
   left: 0;
-  overflow: hidden;
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fff;
   box-shadow: 0 14px 28px rgba(23, 32, 27, 0.12);
+}
+
+.search-recommendation-status {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  background: #fbfcfa;
+  font-size: 12px;
 }
 
 .search-recommendation {
@@ -319,6 +331,11 @@ button:hover {
 
 .dossier-card.wide {
   grid-column: 1 / -1;
+}
+
+.dossier-card.highlight-card {
+  border-color: #9acabc;
+  background: #f7fcfa;
 }
 
 .dossier-card.high {
