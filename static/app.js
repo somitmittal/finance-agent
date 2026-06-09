@@ -24,7 +24,7 @@ const TAB_CONFIG = {
   dossier: {
     target: "dossier",
     title: "Investor Analysis",
-    subtitle: "Fetched FY order disclosures, preferential issues, technical setup, theme mentions, shareholding, and red flags.",
+    subtitle: "Investor verdict, valuation, FY order disclosures, technical setup, themes, shareholding, and red flags.",
   },
   news: {
     target: "verifiedNews",
@@ -223,6 +223,8 @@ function resetInsightStrip(symbol = "") {
   $("confidenceText").textContent = "-";
   $("priceText").textContent = "-";
   $("moveText").textContent = "-";
+  $("valuationText").textContent = "-";
+  $("themeText").textContent = "-";
 }
 
 function resetChatForStock(symbol) {
@@ -246,9 +248,9 @@ function setAnalyzeLoading(isLoading) {
 
 function recommendationLevel(action = "") {
   const normalized = action.toLowerCase();
-  if (normalized.includes("high-risk")) return "high";
-  if (normalized.includes("caution") || normalized.includes("re-check")) return "medium";
-  if (normalized.includes("constructive")) return "clear";
+  if (normalized.includes("high-risk") || normalized.includes("weak setup")) return "high";
+  if (normalized.includes("caution") || normalized.includes("re-check") || normalized.includes("watchlist")) return "medium";
+  if (normalized.includes("constructive") || normalized.includes("attractive")) return "clear";
   return "low";
 }
 
@@ -276,20 +278,137 @@ function renderRecommendationCard(rec = {}) {
   `;
 }
 
+function renderInvestorView(investor = {}) {
+  const valuation = investor.valuation || {};
+  return `
+    <section class="investor-hero ${recommendationLevel(investor.stance || "")}">
+      <div class="investor-hero-main">
+        <span class="label">Investor Advisor View</span>
+        <h3>${escapeHtml(investor.stance || "No investor stance available")}</h3>
+        <p>${escapeHtml(investor.summary || "Search a stock to generate an investor decision framework.")}</p>
+      </div>
+      <div class="score-ring">
+        <span>${escapeHtml(investor.score ?? "-")}</span>
+        <small>Score / 100</small>
+      </div>
+    </section>
+    <div class="decision-grid">
+      <section class="client-card">
+        <div class="client-card-head">
+          <span class="label">What Looks Positive</span>
+          <strong>${(investor.positives || []).length || 0} supporting signal${(investor.positives || []).length === 1 ? "" : "s"}</strong>
+        </div>
+        ${renderSignalCards(investor.positives || [], "No strong positives found in fetched data.")}
+      </section>
+      <section class="client-card">
+        <div class="client-card-head">
+          <span class="label">What Can Go Wrong</span>
+          <strong>${(investor.concerns || []).length || 0} concern${(investor.concerns || []).length === 1 ? "" : "s"}</strong>
+        </div>
+        ${renderSignalCards(investor.concerns || [], "No major concerns found in fetched data.")}
+      </section>
+      <section class="client-card">
+        <div class="client-card-head">
+          <span class="label">Valuation Snapshot</span>
+          <strong>${escapeHtml(valuation.status || "valuation unavailable")}</strong>
+        </div>
+        <p>${escapeHtml(valuation.summary || "Valuation metrics were not available from provider data.")}</p>
+        ${renderMetricGrid(valuation.metrics || {})}
+        ${renderSimpleList(valuation.observations || [], "No valuation observations available.")}
+      </section>
+      <section class="client-card">
+        <div class="client-card-head">
+          <span class="label">Next Checks Before Decision</span>
+          <strong>Investor diligence checklist</strong>
+        </div>
+        ${renderSimpleList(investor.next_checks || [], "No checklist available.")}
+      </section>
+    </div>
+    ${investor.disclaimer ? `<p class="small">${escapeHtml(investor.disclaimer)}</p>` : ""}
+  `;
+}
+
+function renderSignalCards(items, emptyText) {
+  if (!items.length) return `<div class="empty-block">${escapeHtml(emptyText)}</div>`;
+  return `
+    <div class="signal-list">
+      ${items
+        .map(
+          (item) => `
+            <article class="signal-card ${escapeHtml(item.severity || "")}">
+              <strong>${escapeHtml(item.label || "Signal")}</strong>
+              ${item.value ? `<span>${escapeHtml(item.value)}</span>` : ""}
+              <p>${escapeHtml(item.detail || item.summary || "")}</p>
+            </article>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function metricLabel(key) {
+  return {
+    market_cap_crore: "Market Cap",
+    pe_ratio: "P/E",
+    pb_ratio: "P/B",
+    eps: "EPS",
+    book_value: "Book Value",
+    roe_percent: "ROE",
+    roce_percent: "ROCE",
+    debt_to_equity: "Debt/Equity",
+    dividend_yield_percent: "Dividend Yield",
+    revenue_growth_percent: "Revenue Growth",
+    profit_growth_percent: "Profit Growth",
+  }[key] || key.replaceAll("_", " ");
+}
+
+function metricValue(key, value) {
+  if (value === null || value === undefined || value === "") return "-";
+  if (key === "market_cap_crore") return `Rs ${money(value)} crore`;
+  if (key.endsWith("_percent")) return `${Number(value).toFixed(2)}%`;
+  return Number(value).toLocaleString("en-IN", { maximumFractionDigits: 2 });
+}
+
+function renderMetricGrid(metrics) {
+  const entries = Object.entries(metrics || {});
+  if (!entries.length) return `<div class="empty-block">Provider did not return usable valuation metrics.</div>`;
+  return `
+    <div class="metric-grid">
+      ${entries
+        .map(
+          ([key, value]) => `
+            <div>
+              <span>${escapeHtml(metricLabel(key))}</span>
+              <strong>${escapeHtml(metricValue(key, value))}</strong>
+            </div>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
 function renderSummary(result) {
   const latest = result.announcements?.[0];
   const rec = result.recommendation || {};
   const quote = result.quote || {};
+  const investor = result.investor_view || {};
+  const valuation = investor.valuation || {};
+  const theme = investor.market_tailwind || {};
 
-  $("actionText").textContent = rec.action || "No signal";
-  $("confidenceText").textContent = rec.confidence_score ? `${rec.confidence || "-"} (${rec.confidence_score}%)` : rec.confidence || "-";
+  $("actionText").textContent = investor.stance || rec.action || "No signal";
+  $("confidenceText").textContent = investor.score ? `${investor.confidence || "-"} (${investor.score}/100)` : rec.confidence || "-";
   $("priceText").textContent = quote.last_price ? `Rs ${money(quote.last_price)}` : "-";
   $("moveText").textContent = pct(quote.percent_change);
+  $("valuationText").textContent = valuation.status || "-";
+  $("themeText").textContent = theme.label || "-";
 
   if (!latest) {
     setTabViewClasses("summary", "tab-view summary");
     $("summary").innerHTML = `
       ${viewHeader("summary", result.symbol || state.currentSymbol)}
+      ${renderInvestorView(investor)}
       ${renderRecommendationCard(rec)}
       <div class="empty-block">No latest NSE/BSE announcement found for this symbol.</div>
     `;
@@ -300,6 +419,7 @@ function renderSummary(result) {
   setTabViewClasses("summary", "tab-view summary");
   $("summary").innerHTML = `
     ${viewHeader("summary", result.symbol || state.currentSymbol)}
+    ${renderInvestorView(investor)}
     ${renderRecommendationCard(rec)}
     <section class="client-card">
       <div class="client-card-head">
@@ -314,7 +434,7 @@ function renderSummary(result) {
   `;
 }
 
-function renderDossier(dossier = {}) {
+function renderDossier(dossier = {}, investor = {}) {
   const orderBook = dossier.order_book || {};
   const preferential = dossier.preferential_issues || {};
   const movement = dossier.movement || {};
@@ -322,10 +442,38 @@ function renderDossier(dossier = {}) {
   const redFlags = dossier.red_flags || {};
   const technical = dossier.technical || {};
   const shareholding = dossier.shareholding || {};
+  const valuation = investor.valuation || {};
+  const marketTailwind = investor.market_tailwind || {};
 
   $("dossier").innerHTML = `
     ${viewHeader("dossier")}
     <div class="dossier-grid">
+      <section class="dossier-card wide highlight-card">
+        <div class="dossier-card-head">
+          <span class="label">Investor Decision Framework</span>
+          <strong>${escapeHtml(investor.stance || "No investor stance available")}</strong>
+        </div>
+        <p>${escapeHtml(investor.summary || "")}</p>
+        <div class="decision-mini-grid">
+          <div>
+            <span>Valuation</span>
+            <strong>${escapeHtml(valuation.status || "unavailable")}</strong>
+          </div>
+          <div>
+            <span>Market Tailwind</span>
+            <strong>${escapeHtml(marketTailwind.label || "No strong theme")}</strong>
+          </div>
+          <div>
+            <span>Technical Bias</span>
+            <strong>${escapeHtml(technical.bias || "unknown")}</strong>
+          </div>
+          <div>
+            <span>Advisor Score</span>
+            <strong>${escapeHtml(investor.score ?? "-")}/100</strong>
+          </div>
+        </div>
+        ${renderMetricGrid(valuation.metrics || {})}
+      </section>
       <section class="dossier-card wide highlight-card">
         <div class="dossier-card-head">
           <span class="label">Fetched Order / Contract Disclosures by FY</span>
@@ -899,7 +1047,7 @@ async function analyze(symbol, bseCode = "") {
     const result = await api(`/api/stock/${encodeURIComponent(normalized)}/insight${params}`);
     if (requestId !== state.analysisRequestId) return;
     renderSummary(result);
-    renderDossier(result.dossier || {});
+    renderDossier(result.dossier || {}, result.investor_view || {});
     renderVerifiedNews(result.verified_news || [], result.news_analysis || {});
     renderRiskBuckets(result.risk || {});
     renderAnnouncements(result.announcements || []);

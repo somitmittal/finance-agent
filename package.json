@@ -1,0 +1,21 @@
+{
+  "name": "finance-agent",
+  "version": "1.0.0",
+  "description": "A local financial agent for Indian equities. It pulls latest official announcements from NSE and BSE, turns filings into plain-English summaries, and lets you maintain a watch/portfolio list with action-oriented insights.",
+  "main": "index.js",
+  "scripts": {
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git@github-personal:somitmittal/finance-agent.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@playwright/test": "^1.60.0"
+  }
+}

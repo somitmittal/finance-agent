@@ -43,6 +43,7 @@ DB_PATH = DATA_DIR / "portfolio.db"
 NSE_HOME = "https://www.nseindia.com"
 BSE_HOME = "https://www.bseindia.com"
 INDIAN_API_HOME = "https://stock.indianapi.in"
+GEMINI_HOME = "https://generativelanguage.googleapis.com/v1beta"
 NSE_EQUITY_MASTER_URL = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
 
 USER_AGENT = (
@@ -520,6 +521,34 @@ def extract_shareholding(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def extract_valuation_metrics(data: Dict[str, Any], last_price: Optional[float] = None) -> Dict[str, Any]:
+    metrics = {
+        "market_cap_crore": metric_value(data, ("marketcap", "mcap", "marketcapitalization")),
+        "pe_ratio": metric_value(data, ("peratio", "trailingpe", "priceearnings", "priceearningratio")),
+        "pb_ratio": metric_value(data, ("pbratio", "pb", "pricebook")),
+        "eps": metric_value(data, ("eps", "earningpershare")),
+        "book_value": metric_value(data, ("bookvalue", "bookvalueshare")),
+        "roe_percent": metric_value(data, ("roe", "returnonequity")),
+        "roce_percent": metric_value(data, ("roce", "returnoncapital")),
+        "debt_to_equity": metric_value(data, ("debttoequity", "debtequity")),
+        "dividend_yield_percent": metric_value(data, ("dividendyield",)),
+        "revenue_growth_percent": metric_value(data, ("revenuegrowth", "salesgrowth")),
+        "profit_growth_percent": metric_value(data, ("profitgrowth", "patgrowth", "netprofitgrowth")),
+    }
+    if metrics["pe_ratio"] is None and last_price and metrics["eps"]:
+        metrics["pe_ratio"] = round(float(last_price) / metrics["eps"], 2) if metrics["eps"] else None
+    if metrics["pb_ratio"] is None and last_price and metrics["book_value"]:
+        metrics["pb_ratio"] = round(float(last_price) / metrics["book_value"], 2) if metrics["book_value"] else None
+    available = {key: value for key, value in metrics.items() if value is not None}
+    missing = [key for key, value in metrics.items() if value is None]
+    return {
+        "available": bool(available),
+        "metrics": available,
+        "missing": missing,
+        "note": "Valuation metrics are parsed from provider payloads when available; verify against latest financial statements and peers.",
+    }
+
+
 def fetch_indian_api_stock(symbol: str) -> Dict[str, Any]:
     data = fetch_indian_api("/stock", {"name": symbol})
     if not isinstance(data, dict):
@@ -548,6 +577,7 @@ def fetch_indian_api_stock(symbol: str) -> Dict[str, Any]:
         "bse_code": nested_get(data, "companyProfile", "exchangeCodeBse"),
         "nse_code": nested_get(data, "companyProfile", "exchangeCodeNse"),
         "shareholding": extract_shareholding(data),
+        "valuation": extract_valuation_metrics(data, parse_float(last_price)),
         "provider": "IndianAPI",
     }
 
@@ -757,6 +787,33 @@ def parse_float(value: Any) -> Optional[float]:
         return None
 
 
+def parse_metric_number(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).replace(",", "").replace("₹", "").replace("Rs.", "").replace("Rs", "").strip()
+    multiplier = 1.0
+    lowered = text.lower()
+    if "lakh cr" in lowered or "lakh crore" in lowered:
+        multiplier = 100000
+    elif "cr" in lowered or "crore" in lowered:
+        multiplier = 1
+    elif "bn" in lowered or "billion" in lowered:
+        multiplier = 100
+    elif "mn" in lowered or "million" in lowered:
+        multiplier = 0.1
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not match:
+        return None
+    return float(match.group(0)) * multiplier
+
+
+def metric_value(data: Any, fragments: tuple[str, ...]) -> Optional[float]:
+    value = value_by_key_fragment(data, fragments)
+    return parse_metric_number(value)
+
+
 def prime_nse(session: requests.Session) -> None:
     session.headers.update({"Host": "www.nseindia.com"})
     session.get(NSE_HOME, timeout=8)
@@ -821,16 +878,18 @@ def fetch_nse_quote(symbol: str) -> Dict[str, Any]:
 def normalize_nse_quote(symbol: str, data: Any) -> Dict[str, Any]:
     price = data.get("priceInfo", {}) if isinstance(data, dict) else {}
     security = data.get("info", {}) if isinstance(data, dict) else {}
+    last_price = price.get("lastPrice")
     return {
         "symbol": symbol,
         "company": security.get("companyName") or symbol,
-        "last_price": price.get("lastPrice"),
+        "last_price": last_price,
         "change": price.get("change"),
         "percent_change": price.get("pChange"),
         "previous_close": price.get("previousClose"),
         "open": price.get("open"),
         "day_high": price.get("intraDayHighLow", {}).get("max"),
         "day_low": price.get("intraDayHighLow", {}).get("min"),
+        "valuation": extract_valuation_metrics(data if isinstance(data, dict) else {}, parse_float(last_price)),
         "provider": "nsepython" if nsefetch is not None else "NSE",
     }
 
@@ -1287,6 +1346,16 @@ THEME_BUCKETS = {
             "road",
         ],
     },
+}
+
+THEME_TAILWINDS = {
+    "data_center_ai": "AI, cloud, GPU, and data-center capex remain strong investor themes; verify revenue exposure, customer quality, and valuation.",
+    "electronics_semiconductor": "Electronics manufacturing and semiconductor localization are active market themes; verify margins, scale, and customer concentration.",
+    "renewable_energy": "Power transition and renewable capex are active themes; verify project economics, debt load, and execution record.",
+    "defence_aerospace": "Defence indigenization has market tailwinds; verify order visibility, working capital, and execution milestones.",
+    "water_management": "Water and wastewater infrastructure have structural demand; verify order conversion, receivables, and government-payment risk.",
+    "railways_mobility": "Railway and mobility capex can support order flow; verify tender wins, margins, and delivery timelines.",
+    "infra_capex": "Infrastructure capex can support growth, but execution, receivables, and leverage matter more than headlines.",
 }
 
 MAJOR_RED_FLAG_TERMS = {
@@ -2172,6 +2241,207 @@ def analyze_major_red_flags(
     }
 
 
+def valuation_view(quote: Dict[str, Any], themes: Dict[str, Any]) -> Dict[str, Any]:
+    valuation = quote.get("valuation") if isinstance(quote.get("valuation"), dict) else {}
+    metrics = valuation.get("metrics") or {}
+    pe = metrics.get("pe_ratio")
+    pb = metrics.get("pb_ratio")
+    roe = metrics.get("roe_percent")
+    debt_to_equity = metrics.get("debt_to_equity")
+    growth = metrics.get("profit_growth_percent") or metrics.get("revenue_growth_percent")
+    score = 0
+    observations = []
+
+    if pe is not None:
+        if pe <= 20:
+            score += 2
+            observations.append(f"P/E {pe:g} is not demanding on an absolute basis.")
+        elif pe <= 40:
+            score += 1
+            observations.append(f"P/E {pe:g} is moderate; compare with peers and growth.")
+        elif pe >= 70:
+            score -= 2
+            observations.append(f"P/E {pe:g} is expensive unless growth visibility is exceptional.")
+        else:
+            score -= 1
+            observations.append(f"P/E {pe:g} needs strong earnings growth to justify.")
+    else:
+        observations.append("P/E was not available from provider data.")
+
+    if pb is not None:
+        if pb <= 3:
+            score += 1
+            observations.append(f"P/B {pb:g} is reasonable for many non-financial businesses.")
+        elif pb >= 8:
+            score -= 1
+            observations.append(f"P/B {pb:g} is rich; verify ROE quality.")
+    if roe is not None:
+        if roe >= 18:
+            score += 2
+            observations.append(f"ROE {roe:g}% suggests strong return profile if sustainable.")
+        elif roe < 10:
+            score -= 1
+            observations.append(f"ROE {roe:g}% is weak; check margins and capital intensity.")
+    if debt_to_equity is not None:
+        if debt_to_equity <= 0.5:
+            score += 1
+            observations.append(f"Debt/equity {debt_to_equity:g} looks manageable.")
+        elif debt_to_equity >= 2:
+            score -= 2
+            observations.append(f"Debt/equity {debt_to_equity:g} is elevated.")
+    if growth is not None:
+        if growth >= 20:
+            score += 1
+            observations.append(f"Growth metric {growth:g}% supports a premium if repeatable.")
+        elif growth < 0:
+            score -= 1
+            observations.append(f"Growth metric {growth:g}% is negative.")
+
+    if not metrics:
+        status = "valuation unavailable"
+        summary = "Provider did not return usable valuation metrics; do not infer cheap or expensive from price move alone."
+    elif score >= 3:
+        status = "valuation supportive"
+        summary = "Available valuation/quality metrics look supportive, subject to peer and latest-result verification."
+    elif score <= -2:
+        status = "valuation demanding"
+        summary = "Available valuation/quality metrics look demanding or lower quality; require stronger evidence before shortlisting."
+    else:
+        status = "valuation mixed"
+        summary = "Available valuation metrics are mixed; compare with peers, growth, and cyclicality."
+
+    if themes.get("futuristic") == "potential" and pe is not None and pe <= 40:
+        observations.append("Theme exposure plus non-extreme P/E can make this a research candidate, not an automatic entry.")
+
+    return {
+        "status": status,
+        "score": score,
+        "summary": summary,
+        "metrics": metrics,
+        "missing": valuation.get("missing") or [],
+        "observations": observations[:8],
+        "note": valuation.get("note") or "Verify valuation with official financial statements and peer multiples.",
+    }
+
+
+def analyze_investor_view(
+    symbol: str,
+    quote: Dict[str, Any],
+    dossier: Dict[str, Any],
+    risk: Dict[str, Any],
+    news_analysis: Dict[str, Any],
+) -> Dict[str, Any]:
+    order_book = dossier.get("order_book", {})
+    themes = dossier.get("themes", {})
+    technical = dossier.get("technical", {})
+    red_flags = dossier.get("red_flags", {})
+    preferential = dossier.get("preferential_issues", {})
+    valuation = valuation_view(quote, themes)
+    positives = []
+    concerns = []
+    score = 0
+
+    order_value = order_book.get("disclosed_order_value_crore") or 0
+    if order_value >= 500:
+        score += 3
+        positives.append({"label": "Large disclosed order momentum", "value": f"Rs {order_value:,.2f} crore", "detail": order_book.get("headline", "")})
+    elif order_value > 0:
+        score += 1
+        positives.append({"label": "Disclosed order momentum", "value": f"Rs {order_value:,.2f} crore", "detail": order_book.get("headline", "")})
+
+    top_theme = (themes.get("buckets") or [{}])[0]
+    if themes.get("futuristic") == "potential":
+        score += 2
+        positives.append({
+            "label": "Market-theme fit",
+            "value": top_theme.get("label", "Theme exposure"),
+            "detail": THEME_TAILWINDS.get(top_theme.get("id"), themes.get("assessment", "")),
+        })
+    elif themes.get("futuristic") == "watch":
+        score += 1
+        positives.append({"label": "Possible theme exposure", "value": top_theme.get("label", "Watch"), "detail": themes.get("assessment", "")})
+
+    if technical.get("bias") == "bullish":
+        score += 1
+        positives.append({"label": "Technical setup", "value": technical.get("pattern", "bullish"), "detail": technical.get("summary", "")})
+    elif technical.get("bias") == "bearish":
+        score -= 2
+        concerns.append({"label": "Technical weakness", "value": technical.get("pattern", "bearish"), "detail": technical.get("summary", "")})
+
+    if (news_analysis or {}).get("tone") == "constructive":
+        score += 1
+        positives.append({"label": "Verified news tone", "value": "Constructive", "detail": news_analysis.get("summary", "")})
+    elif (news_analysis or {}).get("tone") == "negative":
+        score -= 1
+        concerns.append({"label": "Verified news tone", "value": "Negative", "detail": news_analysis.get("summary", "")})
+
+    score += max(-3, min(3, valuation.get("score", 0)))
+    if valuation.get("status") == "valuation supportive":
+        positives.append({"label": "Valuation quality", "value": valuation["status"], "detail": valuation.get("summary", "")})
+    elif valuation.get("status") in {"valuation demanding", "valuation unavailable"}:
+        concerns.append({"label": "Valuation check", "value": valuation["status"], "detail": valuation.get("summary", "")})
+
+    if risk.get("level") == "high":
+        score -= 5
+        concerns.append({"label": "Major risk bucket", "value": risk.get("verdict", "High risk"), "detail": "High-risk bucket triggered in fetched filings/news."})
+    elif risk.get("level") == "medium":
+        score -= 2
+        concerns.append({"label": "Risk bucket", "value": risk.get("verdict", "Medium risk"), "detail": "Medium-risk bucket needs review before fresh allocation."})
+    if preferential.get("items"):
+        score -= 1
+        concerns.append({"label": "Dilution watch", "value": f"{preferential.get('count', 0)} preferential issue update(s)", "detail": "Check issue price, investor quality, lock-in, and use of proceeds."})
+    if red_flags.get("items"):
+        concerns.extend(red_flags["items"][:3])
+
+    if risk.get("level") == "high":
+        stance = "High-risk: do not shortlist without deeper diligence"
+        confidence = "medium"
+    elif score >= 5 and valuation.get("status") != "valuation demanding":
+        stance = "Attractive research candidate"
+        confidence = "medium" if valuation.get("metrics") else "low"
+    elif score >= 2:
+        stance = "Watchlist candidate; verify valuation and execution"
+        confidence = "medium" if valuation.get("metrics") else "low"
+    elif score <= -2:
+        stance = "Weak setup; wait for better evidence"
+        confidence = "medium"
+    else:
+        stance = "Neutral; evidence is not decisive"
+        confidence = "low"
+
+    next_checks = [
+        "Open latest annual/quarterly results and verify revenue, margin, debt, cash flow, and promoter pledge trends.",
+        "Compare P/E, P/B, ROE, growth, and order-book-to-sales against direct peers.",
+        "Read the original order/preferential issue filings before relying on parsed amounts.",
+    ]
+    if top_theme.get("id") in THEME_TAILWINDS:
+        next_checks.append("Validate how much revenue actually comes from the detected theme; theme keywords alone are not enough.")
+
+    return {
+        "symbol": symbol,
+        "stance": stance,
+        "score": max(0, min(100, 50 + score * 7)),
+        "confidence": confidence,
+        "summary": f"{stance}. Score is driven by disclosed orders, theme fit, valuation availability, technical bias, verified news, and red flags.",
+        "positives": positives[:6],
+        "concerns": concerns[:8],
+        "valuation": valuation,
+        "market_tailwind": {
+            "label": top_theme.get("label", "No strong theme detected"),
+            "summary": THEME_TAILWINDS.get(top_theme.get("id"), themes.get("assessment", "No clear market tailwind was detected from fetched text.")),
+            "score": top_theme.get("score", 0),
+        },
+        "technical": {
+            "bias": technical.get("bias", "unknown"),
+            "pattern": technical.get("pattern", "unknown"),
+            "summary": technical.get("summary", "Technical setup unavailable."),
+            "levels": technical.get("levels", {}),
+        },
+        "next_checks": next_checks[:5],
+        "disclaimer": "Research decision-support only, not personalized investment advice.",
+    }
+
+
 def analyze_dossier(
     symbol: str,
     quote: Dict[str, Any],
@@ -2284,7 +2554,9 @@ def compact_stock_context(context: Dict[str, Any]) -> Dict[str, Any]:
         "symbol": context.get("symbol"),
         "quote": context.get("quote", {}),
         "recommendation": context.get("recommendation", {}),
+        "investor_view": context.get("investor_view", {}),
         "risk": context.get("risk", {}),
+        "valuation": (context.get("investor_view", {}) or {}).get("valuation", {}),
         "order_book": dossier.get("order_book", {}),
         "preferential_issues": dossier.get("preferential_issues", {}),
         "movement": dossier.get("movement", {}),
@@ -2311,22 +2583,19 @@ def compact_stock_context(context: Dict[str, Any]) -> Dict[str, Any]:
 def deterministic_stock_answer(question: str, context: Dict[str, Any]) -> str:
     compact = compact_stock_context(context)
     lowered_question = question.lower()
+    valuation = compact.get("valuation", {})
+    has_valuation = bool(valuation.get("metrics"))
     unsupported_terms = {
         "cash flow",
         "debt to equity",
         "ebitda",
-        "eps",
         "financials",
         "margin",
-        "p/e",
         "peer",
-        "pe ratio",
         "profit",
         "ratio",
         "revenue",
-        "roe",
         "roce",
-        "valuation",
     }
     if any(term in lowered_question for term in unsupported_terms):
         return (
@@ -2340,12 +2609,15 @@ def deterministic_stock_answer(question: str, context: Dict[str, Any]) -> str:
     movement = compact.get("movement", {})
     technical = compact.get("technical", {})
     themes = compact.get("themes", {})
+    investor_view = compact.get("investor_view", {})
     order_book = compact.get("order_book", {})
     shareholding = compact.get("shareholding", {})
     red_flags = compact.get("red_flags", {})
     parts = [
         f"Question: {question}",
+        f"Investor stance: {investor_view.get('stance', 'No investor stance available')} with score {investor_view.get('score', '-')}/100.",
         f"For {compact.get('symbol')}, the current decision-support signal is {recommendation_data.get('action', 'Neutral signal / watch')} with {recommendation_data.get('confidence', 'low')} confidence.",
+        valuation.get("summary", "") if has_valuation else "Valuation metrics are not available in the current scan.",
         movement.get("summary", ""),
         technical.get("summary", ""),
         themes.get("assessment", ""),
@@ -2370,7 +2642,7 @@ def openai_stock_answer(question: str, context: Dict[str, Any]) -> Optional[str]
         "You are a cautious Indian equities research assistant. Answer only from the provided JSON context. "
         "Separate facts, inference, and risk. Do not invent financial, valuation, peer, or ownership data. "
         "If the requested data is missing, say it is not available in the current scan. Cite the relevant context fields by name, "
-        "such as latest_announcements, verified_news, order_book, technical, shareholding, risk, or red_flags. "
+        "such as investor_view, valuation, latest_announcements, verified_news, order_book, technical, shareholding, risk, or red_flags. "
         "Do not give direct trade advice; frame answers as decision-support signals. Include a short disclaimer that this is not financial advice."
     )
     try:
@@ -2386,10 +2658,53 @@ def openai_stock_answer(question: str, context: Dict[str, Any]) -> Optional[str]
         return None
 
 
+def gemini_stock_answer(question: str, context: Dict[str, Any]) -> Optional[str]:
+    key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not key:
+        return None
+    payload = compact_stock_context(context)
+    system_prompt = (
+        "You are a cautious Indian equities research assistant. Use only the provided JSON context. "
+        "Give an investor decision-support view with facts, positives, risks, valuation caveats, technical setup, and next checks. "
+        "Do not invent financials, valuation, order-book values, or peer data. If data is missing, say so. "
+        "Do not give direct trade advice; use research-candidate/watchlist/high-risk language and include a brief not-financial-advice disclaimer."
+    )
+    model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    try:
+        response = http_session().post(
+            f"{GEMINI_HOME}/models/{model}:generateContent",
+            params={"key": key},
+            json={
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "text": f"{system_prompt}\n\nQuestion: {question}\n\nContext JSON:\n{json.dumps(payload, default=str)}"
+                            }
+                        ],
+                    }
+                ],
+                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 900},
+            },
+            timeout=18,
+        )
+        response.raise_for_status()
+        data = response.json()
+        parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
+        text = " ".join(str(part.get("text", "")) for part in parts if isinstance(part, dict)).strip()
+        return text or None
+    except Exception:
+        return None
+
+
 def answer_stock_question(symbol: str, question: str, bse_code: str = "") -> Dict[str, Any]:
     context = stock_context(symbol, bse_code)
-    answer = openai_stock_answer(question, context)
-    source = "openai" if answer else "rules"
+    answer = gemini_stock_answer(question, context)
+    source = "gemini" if answer else "rules"
+    if not answer:
+        answer = openai_stock_answer(question, context)
+        source = "openai" if answer else "rules"
     answer = answer or deterministic_stock_answer(question, context)
     return {
         "symbol": symbol,
@@ -2414,6 +2729,8 @@ def stock_context(symbol: str, bse_code: str = "", holding: Optional[Dict[str, A
     news_analysis = analyze_verified_news(verified_news)
     risk = analyze_risk(symbol, quote, announcements, holding)
     dossier = analyze_dossier(symbol, quote, announcements, verified_news, risk)
+    recommendation_data = recommendation(quote, announcements, holding, risk, news_analysis)
+    investor_view = analyze_investor_view(symbol, quote, dossier, risk, news_analysis)
     return {
         "symbol": symbol,
         "quote": quote,
@@ -2422,7 +2739,8 @@ def stock_context(symbol: str, bse_code: str = "", holding: Optional[Dict[str, A
         "news_analysis": news_analysis,
         "risk": risk,
         "dossier": dossier,
-        "recommendation": recommendation(quote, announcements, holding, risk, news_analysis),
+        "recommendation": recommendation_data,
+        "investor_view": investor_view,
     }
 
 

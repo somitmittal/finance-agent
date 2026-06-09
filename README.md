@@ -9,6 +9,8 @@ Create a local `.env` file:
 ```bash
 INDIAN_API_KEY=your_indianapi_key
 OPENAI_API_KEY=optional_openai_key
+GEMINI_API_KEY=optional_gemini_key
+GEMINI_MODEL=gemini-1.5-flash
 ```
 
 ```bash
@@ -27,7 +29,7 @@ uvicorn app.main:app --host 0.0.0.0 --port $PORT
 
 Render injects `PORT` automatically. The app must listen on `0.0.0.0`, not `127.0.0.1`, or the deploy health check will fail.
 
-Add environment variables in the Render dashboard: `INDIAN_API_KEY`, and optionally `OPENAI_API_KEY`.
+Add environment variables in the Render dashboard: `INDIAN_API_KEY`, and optionally `GEMINI_API_KEY`, `GEMINI_MODEL`, and `OPENAI_API_KEY`.
 
 Health check path: `/health`
 
@@ -38,8 +40,9 @@ Health check path: `/health`
 - Add a BSE scrip code in the portfolio form when you know it. BSE keyword search is also attempted when only a symbol/name is available.
 - `nsepython` wraps NSE's public site endpoints. The app keeps a direct NSE fallback if the package is unavailable or fails.
 - BSE announcements still use BSE's public web endpoint as a fallback/source.
-- If `OPENAI_API_KEY` is set, the analyst uses OpenAI for richer summaries. Otherwise it falls back to deterministic plain-English heuristics.
+- If `GEMINI_API_KEY` or `OPENAI_API_KEY` is set, the chat analyst uses that LLM for grounded answers. Gemini is tried first, then OpenAI, then deterministic heuristics.
 - Recommendations are informational signals, not financial advice.
+- The investor readout weighs positives, red flags, technical setup, market-theme fit, valuation availability, and next diligence checks. It does not infer cheap/expensive valuation when provider metrics are missing.
 
 ## Risk Buckets
 
@@ -55,10 +58,10 @@ The risk tab screens each stock and portfolio holding for Gensol-style red flags
 
 ## Verified News
 
-The agent also scans trusted news sources before giving a buy/hold/sell-style action:
+The agent also scans trusted news sources before giving a decision-support signal:
 
 - IndianAPI stock news is used when available.
 - Google News RSS is queried for recent stock/company coverage.
 - Only trusted publishers and official-style sources are kept, such as NSE, BSE, SEBI, Reuters, Economic Times, Business Standard, Moneycontrol, LiveMint, Indian Express, Financial Express, NDTV Profit, and Hindu BusinessLine.
 - Rumor/speculation language is filtered out before scoring.
-- The final recommendation combines exchange filings, risk buckets, verified news tone, price context, and portfolio cost basis into a confidence score from 15-95.
+- The final signal combines exchange filings, risk buckets, verified news tone, price context, valuation fields when available, and portfolio cost basis into a confidence score.
